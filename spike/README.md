@@ -134,3 +134,22 @@ Test kit note: a test's own hooks cannot call `$.http.fetch` (refused, "its hook
 it"), and the test body's `$` has no `http` noun. Shadow tests drive `shadowFetch` / `shadowStep` /
 `routedStep` directly with a counting `next` as the network; one plugin-level test checks the routed
 step reaches the engine with the shadow model and yields none of its chunks.
+
+## Task 5 live check: timeout race vs the hook budget (2026-11-14)
+
+The reference says a `$.clock.sleep` counts against a hook's 10 s budget, while a `$` call in flight
+does not. Question: does a long timeout sleep, raced against an in-flight `$.http.fetch`, use up the
+budget? Throwaway `--plugin-dir` mod (scratch dir, not kept), `turn.step` for model `budget-test`,
+no `next()`, local HTTP server that answers after 25 s:
+
+| Race | Result |
+|---|---|
+| `$.http.fetch` (25 s) vs `$.clock.sleep(60000, { signal })` | fetch won after 25,032 ms; `next.signal` not aborted; step ended normally |
+| `$.http.fetch` (25 s) vs `$.clock.sleep(15000, { signal })` | timer won after 15,004 ms; `next.signal` not aborted |
+
+Verdict: the race design in `hooks/call.ts` holds; a sleep running beside an in-flight fetch does not
+end the hook at 10 s. Default provider timeout: 600 s (non-streamed replies can be long).
+
+Test kit note: the kit loads the mod in its own module instance, so a test hook cannot reach the mod's
+shadow map through an import; plugin-level routed tests stop at "shadow request failed" and the
+success path is tested through `routedStep` with injected `fetch` / `sleep` / `signal`.

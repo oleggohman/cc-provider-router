@@ -1,6 +1,9 @@
 import type { Register } from 'claude-code'
-import { loadConfig, type Config } from './config.ts'
+import { raceCall, type Sleep } from './call.ts'
+import { toChunks, toResult } from './chunks.ts'
+import { loadConfig, missingKeyMessage, type Config } from './config.ts'
 import { errorChunks, localError } from './errors.ts'
+import { ANTHROPIC_ROWS, complete as anthropicComplete, type Fetch } from './providers/anthropic.ts'
 import { buildRequest } from './request.ts'
 import { parseModel, type Route } from './route.ts'
 import { shadowFetch, shadowStep } from './shadow.ts'
@@ -24,11 +27,25 @@ export const register: Register = (on, options) => {
     const route = parseModel(e.model)
     if (!route) return yield* next(e)
     config ??= loadConfig($, options)
-    return yield* routedStep(e, next, route, await config)
+    const io: StepIO = {
+      fetch: (url, init) => $.http.fetch(url, init),
+      sleep: (ms, opts) => $.clock.sleep(ms, opts),
+      signal: next.signal,
+    }
+    return yield* routedStep(e, next, route, await config, io)
   })
 }
 
 type StepEvent = { turnId: string; index: number; model: string; messageCount: number; agentId?: string; effort?: string | number }
+
+// What a routed step needs from `$` and `next`; tests pass stand-ins (the
+// test kit refuses `$.http.fetch` from a test's own hooks).
+export type StepIO = { fetch: Fetch; sleep: Sleep; signal: AbortSignal; timeoutMs?: number }
+
+// The step ended by Esc: no chunks, no error text, no response.
+function cancelled(e: { turnId: string; index: number }) {
+  return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+}
 
 // A routed step: shadow capture, provider request, reply. The engine's own
 // shadow chunks are drained inside shadowStep and never yielded here.
@@ -37,17 +54,39 @@ export async function* routedStep<E extends StepEvent>(
   next: (e: E) => AsyncIterable<unknown>,
   route: Route,
   cfg: Config,
+  io?: StepIO,
 ): AsyncGenerator<any, any, unknown> {
   const secrets = [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)]
+  const name = label(route)
+  // Check the key before the shadow step: no engine work for a step that
+  // cannot be answered.
+  const row = route.provider === 'anthropic' || route.provider === 'zai' ? ANTHROPIC_ROWS[route.provider] : undefined
+  const key = route.provider === 'custom' ? undefined : cfg.keys[route.provider]
+  if (route.provider !== 'custom' && !key) return yield* errorChunks(e, localError(name, missingKeyMessage(route.provider), secrets))
   let body: any
   try {
     body = await shadowStep(e, next)
   } catch (err) {
-    return yield* errorChunks(e, localError(label(route), `shadow request failed: ${String(err)}`, secrets))
+    return yield* errorChunks(e, localError(name, `shadow request failed: ${String(err)}`, secrets))
   }
   const built = buildRequest(body, route, e)
-  void built
-  // Provider adapters arrive in Tasks 5-6. Until then a routed step ends
-  // with a clear error and never reaches the network.
-  return yield* errorChunks(e, localError(label(route), `adapter for ${label(route)} not implemented yet`, secrets))
+  if (!row || !key) {
+    // The OpenAI-compatible adapter arrives in Task 6. Until then a routed
+    // step ends with a clear error and never reaches the network.
+    return yield* errorChunks(e, localError(name, `adapter for ${name} not implemented yet`, secrets))
+  }
+  if (!io) return yield* errorChunks(e, localError(name, 'no network access in this context', secrets))
+  const out = await raceCall(io.sleep, io.signal, () => anthropicComplete(io.fetch, built.request, row, key), io.timeoutMs)
+  switch (out.kind) {
+    case 'cancelled':
+      return cancelled(e)
+    case 'timeout':
+      return yield* errorChunks(e, localError(name, `no reply within ${out.ms} ms (timed out)`, secrets))
+    case 'failed':
+      return yield* errorChunks(e, localError(name, `request failed: ${String(out.error)}`, secrets))
+    case 'done':
+      if (!out.value.ok) return yield* errorChunks(e, out.value.error)
+      yield* toChunks(out.value.reply)
+      return toResult(e, out.value.reply)
+  }
 }

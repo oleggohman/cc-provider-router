@@ -167,14 +167,15 @@
 **Files:**
 - Create: `hooks/providers/anthropic.ts`, `hooks/providers/anthropic.test.ts`, `hooks/chunks.ts`, `hooks/chunks.test.ts`, `hooks/call.ts`, `hooks/call.test.ts`
 
-- [ ] write tests for `toChunks()`/`toResult()`: text, tool calls, mixed, each stop reason, usage
-- [ ] implement `chunks.ts`
-- [ ] write tests for `call.ts`: success (timer aborted, no leftover sleep), timeout (error reply), Esc before reply (step ends cleanly, no error text, no unhandled rejection) — ⚠️ Esc simulated by aborting `next.signal` in tests; the real key is a Task 8 manual check
-- [ ] implement `call.ts`
-- [ ] write adapter tests with mocked `http.fetch`: success, tool_use reply, 401, 429, 5xx
-- [ ] implement the adapter (`POST <base>/v1/messages`, `anthropic-version`, auth per provider row); wire `anthropic:` and `zai:`; hook-level tests through `turn.step` for both
-- [ ] write tests for the `zai:` row: Bearer header, base URL, Z.ai error body shape (mocked)
-- [ ] run tests — must pass before Task 6
+- [x] write tests for `toChunks()`/`toResult()`: text, tool calls, mixed, each stop reason, usage
+- [x] implement `chunks.ts`
+- [x] write tests for `call.ts`: success (timer aborted, no leftover sleep), timeout (error reply), Esc before reply (step ends cleanly, no error text, no unhandled rejection) — ⚠️ Esc simulated by aborting `next.signal` in tests; the real key is a Task 8 manual check
+- [x] implement `call.ts` (default timeout 600 s; live-checked that the racing sleep does not use up the 10 s hook budget, see spike/README.md)
+- [x] write adapter tests with mocked `http.fetch`: success, tool_use reply, 401, 429, 5xx
+- [x] implement the adapter (`POST <base>/v1/messages`, `anthropic-version`, auth per provider row); wire `anthropic:` and `zai:`; hook-level tests through `turn.step` for both (⚠️ kit: plugin-level `turn.step` tests cover key loading + shadow + no network; the success path runs through `routedStep` with injected fetch/sleep/signal, since the kit's mod instance cannot receive a shadow request from a test hook)
+- [x] write tests for the `zai:` row: Bearer header, base URL, Z.ai error body shape (mocked)
+- [x] run tests — must pass before Task 6
+- [x] ➕ missing key is checked before the shadow step (no engine work for a step that cannot be answered); the plugin-level shadow test now supplies `OPENAI_API_KEY`
 
 ### Task 6: OpenAI-compatible adapter (OpenAI Platform + custom endpoints)
 **Files:**

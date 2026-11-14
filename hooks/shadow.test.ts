@@ -364,7 +364,8 @@ describe('shadowStep', () => {
 describe('through the plugin', () => {
   test('a routed step calls the engine with the shadow model and yields none of its chunks', async ($, on) => {
     on('clock.sleep', () => ({ value: undefined }) as any)
-    on('env.get', () => ({ value: undefined }) as any)
+    // A key, so the step gets past the missing-key check to the shadow.
+    on('env.get', (_$, e: any) => ({ value: e.name === 'OPENAI_API_KEY' ? 'sk-test-plugin-key-123456' : undefined }) as any)
     const net: any[] = []
     on('http.fetch', (_$, e) => {
       net.push(e)
