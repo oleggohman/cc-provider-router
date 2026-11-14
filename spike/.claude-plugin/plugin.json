@@ -1,0 +1,9 @@
+{
+  "name": "provider-spike",
+  "version": "0.1.0",
+  "description": "Spike: verify the plugin API facts the provider router depends on.",
+  "userConfig": {
+    "spikeKey": { "type": "string", "title": "Spike key", "description": "A sensitive test field.", "sensitive": true },
+    "spikeList": { "type": "string", "multiple": true, "title": "Spike list", "description": "A string[] test field.", "default": [] }
+  }
+}
