@@ -95,3 +95,42 @@ and its 401 answer reached the mod. Notes for Task 2+ tests:
 - Config refresh: `options` at `register` (module reloads on change).
 - Context meter: mod-side usage tracking; `$.session.usage()` is not fed by routed steps.
 - Error stop: `refusal`; context overflow: `model_context_window_exceeded`.
+
+## Task 4 live check: the shadow model id (2026-11-14)
+
+`spike-echo` now runs two shadow captures in one step, `claude-haiku-4-5` then `provider-router-shadow`
+(real first: MCP connectors still connecting on the first step otherwise skew the tool list), and
+compares them. The spike's `http.fetch` hook refuses (local 400) any `provider-router-shadow` request it
+did not capture. Runs: main `--model spike-echo` (3 runs), subagent `echo-agent` with main on `haiku` (1 run).
+
+| Item | Main loop | Subagent |
+|---|---|---|
+| tool names (order) | identical (17) | identical (`Read, Bash, SubagentHandback`) |
+| tool `input_schema` | identical | identical |
+| tool `description` | differs for some built-ins (Agent, Bash, Edit, Read, Skill, ToolSearch, Workflow, Write) | differs for Read, Bash on step 0 |
+| `system` | identical (7,992 chars) | identical (1,939 chars) |
+| `messages` | differ in wording (reminder text variant) | - |
+| `max_tokens` | 32000 both | 32000 both |
+| `thinking` | shadow `{type:"adaptive"}`, haiku `{type:"enabled",budget_tokens:31999}` | same |
+| extra keys | shadow adds `output_config: {effort:"high"}` | same |
+
+What the engine does with the unknown id: it does **not** reject it. It logs
+`[claude-code:unrecognized_model] {"model":"provider-router-shadow"}`, then builds and sends the request
+like for its newest models (adaptive thinking, `output_config.effort`, the newer tool-description and
+reminder wording). `max_tokens` is not shrunk (32000).
+
+Verdict: keep `SHADOW_MODEL = provider-router-shadow`. Names, schemas and system prompt match; only
+prose (descriptions, reminders) follows the newest-model variant, which suits a non-Claude provider at
+least as well. `thinking` and `output_config` are first-party fields and are dropped by `buildRequest`.
+
+Safety: across the runs every `provider-router-shadow` request was captured locally (8/8 in the
+subagent run; 0 refused, 0 reached the network).
+
+`e.messageCount` is NOT the API message count: live, the main step had `messageCount: 22` and the
+captured request 2 messages (stored rows merge into fewer API messages). The strict match therefore
+uses `1 <= messages.length <= messageCount`, not equality.
+
+Test kit note: a test's own hooks cannot call `$.http.fetch` (refused, "its hooks module does not call
+it"), and the test body's `$` has no `http` noun. Shadow tests drive `shadowFetch` / `shadowStep` /
+`routedStep` directly with a counting `next` as the network; one plugin-level test checks the routed
+step reaches the engine with the shadow model and yields none of its chunks.

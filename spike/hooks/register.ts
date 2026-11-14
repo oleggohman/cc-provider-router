@@ -36,6 +36,25 @@ function rec(what: string, data: unknown): string {
 }
 
 let capture: ((body: any) => void) | null = null
+const SHADOW = 'provider-router-shadow'
+
+// Captures the engine's request for one shadow step under `model`.
+async function shadow(next: any, e: any, model: string): Promise<any> {
+  let req: any = null
+  capture = b => {
+    req = b
+  }
+  let chunks = 0
+  let err: string | null = null
+  try {
+    for await (const _ of next({ ...e, model })) chunks++
+  } catch (x) {
+    err = String(x)
+  }
+  capture = null
+  return { req, chunks, err }
+}
+
 
 export const register: Register = (on, options) => {
 
@@ -55,6 +74,12 @@ export const register: Register = (on, options) => {
         capture = null
         cb(parsed)
         return { value: { status: 200, ok: true, headers: { 'content-type': 'text/event-stream' }, text: sse('captured') } }
+      }
+      // Fail closed: a shadow-model request that matches no capture never
+      // reaches the network.
+      if (parsed.model === SHADOW) {
+        await $.fs.write(LOG, rec('shadow-refused', { model: parsed.model }))
+        return { value: { status: 400, ok: false, headers: { 'content-type': 'application/json' }, text: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'provider-router: shadow request refused' } }) } }
       }
     }
     return next(e)
@@ -78,12 +103,41 @@ export const register: Register = (on, options) => {
     if (e.model === 'spike-echo' || e.model === 'spike-compact') {
       // Option (c) per step: let the engine build this step's request under a
       // real model id, read it in http.fetch and answer it without the network.
-      let req: any = null
-      capture = b => {
-        req = b
-      }
-      const s = next({ ...e, model: 'claude-haiku-4-5' })
-      for await (const _ of s) void _
+      // Real first, then shadow: MCP connectors may still be connecting on the
+      // first step, so the later capture sees the fuller tool list.
+      const real = await shadow(next, e, 'claude-haiku-4-5')
+      const sh = await shadow(next, e, SHADOW)
+      const req = real.req
+      const a = sh.req, b = real.req
+      const sysOf = (r: any) => (Array.isArray(r?.system) ? r.system.map((x: any) => x.text).join('\n') : String(r?.system ?? ''))
+      const sa = sysOf(a), sb = sysOf(b)
+      let firstDiff = -1
+      for (let i = 0; i < Math.max(sa.length, sb.length); i++) if (sa[i] !== sb[i]) { firstDiff = i; break }
+      await $.fs.write(LOG, rec('shadow-compare', {
+        agentId: e.agentId ?? null,
+        shadowCaptured: !!a, shadowChunks: sh.chunks, shadowErr: sh.err,
+        realCaptured: !!b, realErr: real.err,
+        shadowKeys: a ? Object.keys(a) : null, realKeys: b ? Object.keys(b) : null,
+        toolsEqual: JSON.stringify(a?.tools) === JSON.stringify(b?.tools),
+        toolNamesShadow: a?.tools?.map((t: any) => t.name) ?? null,
+        toolNamesReal: b?.tools?.map((t: any) => t.name) ?? null,
+        systemEqual: sa === sb, systemCharsShadow: sa.length, systemCharsReal: sb.length,
+        systemDiff: firstDiff < 0 ? null : { at: firstDiff, shadow: sa.slice(Math.max(0, firstDiff - 60), firstDiff + 120), real: sb.slice(Math.max(0, firstDiff - 60), firstDiff + 120) },
+        messagesEqual: JSON.stringify(a?.messages) === JSON.stringify(b?.messages),
+        maxTokens: [a?.max_tokens, b?.max_tokens], thinking: [a?.thinking ?? null, b?.thinking ?? null],
+        contextMgmt: [a?.context_management ?? null, b?.context_management ?? null],
+        model: [a?.model, b?.model],
+        namesEqual: JSON.stringify(a?.tools?.map((t: any) => t.name)) === JSON.stringify(b?.tools?.map((t: any) => t.name)),
+        toolDiffs: (a?.tools ?? []).map((t: any, i: number) => {
+          const u = b?.tools?.[i]
+          if (JSON.stringify(t) === JSON.stringify(u)) return null
+          const ks = [...new Set([...Object.keys(t), ...Object.keys(u ?? {})])].filter(k => JSON.stringify(t[k]) !== JSON.stringify(u?.[k]))
+          return { name: t.name, keys: ks, shadow: ks.map(k => JSON.stringify(t[k])?.slice(0, 200)), real: ks.map(k => JSON.stringify(u?.[k])?.slice(0, 200)) }
+        }).filter(Boolean),
+        msgText: (() => { const x = JSON.stringify(a?.messages) ?? '', y = JSON.stringify(b?.messages) ?? ''; let i = 0; while (i < x.length && x[i] === y[i]) i++; return { at: i, shadow: x.slice(i - 80, i + 400), real: y.slice(i - 80, i + 900) } })(),
+        outputConfig: a?.output_config ?? null,
+        msgDiff: JSON.stringify(a?.messages).length - JSON.stringify(b?.messages).length,
+      }))
       const sys = Array.isArray(req?.system) ? req.system.map((b: any) => b.text).join('\n') : String(req?.system ?? '')
       await $.fs.write(LOG, rec('captured-request', {
         agentId: e.agentId ?? null,

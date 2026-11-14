@@ -150,16 +150,18 @@
 - Create: `hooks/request.ts`, `hooks/request.test.ts`, `hooks/shadow.ts`, `hooks/shadow.test.ts`, `hooks/errors.ts`, `hooks/errors.test.ts`
 - Create: `tests/fixtures/` (transcripts: text only, tool round-trip, images, documents, thinking blocks, subagent)
 
-- [ ] ➕ live check (spike harness, few short haiku-main runs): with `SHADOW_MODEL = provider-router-shadow`, the captured `tools` / `system` for main and a subagent equal those captured with `claude-haiku-4-5`; also record what the engine does with the unknown id before building the request (rejects it? shrinks `max_tokens` / thinking?); record in `spike/README.md`; if they differ, use the documented real model and note it (⚠️)
-- [ ] ➕ write tests for `shadow.ts` (strict match + fail closed, see Solution Overview). Every test asserts the hook beneath the mod (the network) was called **0 times** for shadow traffic: match answered with stub; header missing; a 2nd and 3rd engine request in the same step; a side request (other model, no tools) on a pending loop; a shadow-model request matching no entry; pending kept until the stream ends and cleared after (success, error, abort); a second shadow on an already-pending key refused; main + subagent pending at once; two instances of the same agent type in parallel; empty map after reload refuses a stray shadow request; a refused shadow step ends (400, no retry loop) and bumps `shadowRefused`
-- [ ] ➕ write tests: the stub's chunks are never yielded, its usage is zero, `shadowLeaks` stays 0; the mod's own fetches pass through
-- [ ] ➕ implement `shadow.ts` (`shadowStep($, e, next)` → captured body; `Map<loopKey, Pending>`; refuse rule; `shadowLeaks` counter)
-- [ ] ⚠️ write tests building the provider request from the captured body (system, tools, messages, `max_tokens`; first-party fields dropped; model replaced), including subagent tool sets
-- [ ] ➕ write tests (fixture): deferred tools / tool search (`defer_loading`, `tool_reference` blocks) are flattened or dropped for the OpenAI adapter and kept for Anthropic-compatible ones
-- [ ] implement `buildRequest(body, e)`
-- [ ] ⚠️ write tests for `errors.ts`: status → message, key stripping, stop reason `refusal` (`model_context_window_exceeded` for context-length errors); a parent agent receives the `[provider-router]`-prefixed text from a refusal-stopped subagent step
-- [ ] implement `errors.ts`
-- [ ] run tests — must pass before Task 5
+- [x] ➕ live check (spike harness, few short haiku-main runs): with `SHADOW_MODEL = provider-router-shadow`, the captured `tools` / `system` for main and a subagent equal those captured with `claude-haiku-4-5`; also record what the engine does with the unknown id before building the request (rejects it? shrinks `max_tokens` / thinking?); record in `spike/README.md`; if they differ, use the documented real model and note it (⚠️) — done: names, schemas, system identical; descriptions/reminders use the newest-model wording; engine accepts the id (logs unrecognized_model), adaptive thinking + output_config added (dropped by buildRequest). Kept `provider-router-shadow`.
+- [x] ➕ write tests for `shadow.ts` (strict match + fail closed, see Solution Overview). Every test asserts the hook beneath the mod (the network) was called **0 times** for shadow traffic: match answered with stub; header missing; a 2nd and 3rd engine request in the same step; a side request (other model, no tools) on a pending loop; a shadow-model request matching no entry; pending kept until the stream ends and cleared after (success, error, abort); a second shadow on an already-pending key refused; main + subagent pending at once; two instances of the same agent type in parallel; empty map after reload refuses a stray shadow request; a refused shadow step ends (400, no retry loop) and bumps `shadowRefused`
+- [x] ➕ write tests: the stub's chunks are never yielded, its usage is zero, `shadowLeaks` stays 0; the mod's own fetches pass through
+- [x] ➕ implement `shadow.ts` (`shadowStep($, e, next)` → captured body; `Map<loopKey, Pending>`; refuse rule; `shadowLeaks` counter)
+- [x] ⚠️ write tests building the provider request from the captured body (system, tools, messages, `max_tokens`; first-party fields dropped; model replaced), including subagent tool sets
+- [x] ➕ write tests (fixture): deferred tools / tool search (`defer_loading`, `tool_reference` blocks) are flattened or dropped for the OpenAI adapter and kept for Anthropic-compatible ones
+- [x] implement `buildRequest(body, e)`
+- [x] ⚠️ write tests for `errors.ts`: status → message, key stripping, stop reason `refusal` (`model_context_window_exceeded` for context-length errors); a parent agent receives the `[provider-router]`-prefixed text from a refusal-stopped subagent step
+- [x] implement `errors.ts`
+- [x] ➕ ⚠️ strict match uses `1 <= messages.length <= e.messageCount`: live, `messageCount` counts stored rows (22) while the request had 2 API messages
+- [x] ➕ test kit refuses `$.http.fetch` from a test's own hooks: shadow tests drive `shadowFetch`/`shadowStep`/`routedStep` directly with a counting network `next`
+- [x] run tests — must pass before Task 5
 
 ### Task 5: Anthropic Platform adapter, chunks, timeout and cancel
 **Files:**
