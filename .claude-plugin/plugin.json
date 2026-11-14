@@ -2,5 +2,12 @@
   "name": "provider-router",
   "version": "0.1.0",
   "description": "Route model requests by model-id prefix (anthropic:, openai:, zai:, custom:) to other providers, while unprefixed models stay on your Claude subscription.",
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "openaiApiKey": { "type": "string", "title": "OpenAI API key", "description": "Key for openai: models. Overrides env OPENAI_API_KEY.", "sensitive": true, "required": false },
+    "anthropicApiKey": { "type": "string", "title": "Anthropic Platform API key", "description": "Key for anthropic: models. Overrides env ROUTER_ANTHROPIC_API_KEY.", "sensitive": true, "required": false },
+    "zaiApiKey": { "type": "string", "title": "Z.ai API key", "description": "Key for zai: models. Overrides env ZAI_API_KEY.", "sensitive": true, "required": false },
+    "customEndpoints": { "type": "string", "multiple": true, "title": "Custom endpoints", "description": "OpenAI-compatible endpoints as name=url, used as custom:<name>:<model>. Keys from env ROUTER_CUSTOM_API_KEYS (name=key,...).", "default": [] },
+    "contextWindows": { "type": "string", "multiple": true, "title": "Context windows", "description": "Extra context windows as model=tokens, e.g. openai:my-model=128000.", "default": [] }
+  }
 }

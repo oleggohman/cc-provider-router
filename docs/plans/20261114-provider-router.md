@@ -73,7 +73,7 @@
 - **Config — must be simple**:
   - **Zero config via env**: `OPENAI_API_KEY` → `openai:` works; `ROUTER_ANTHROPIC_API_KEY` → `anthropic:` works; `ZAI_API_KEY` → `zai:` works (e.g. `zai:glm-5.3`). (Not `ANTHROPIC_API_KEY`: that variable makes Claude Code itself drop the Max sign-in — the README says so.)
   - **Or in `/config`** (`userConfig`, keys `sensitive` → secure storage): `openaiApiKey`, `anthropicApiKey`, `zaiApiKey`. Config value wins over env.
-  - **Custom endpoints**: one `userConfig` list field `customEndpoints` (⚠️ declared `"type": "string", "multiple": true`; `string[]` fails validate), each entry `name=url` with an optional key reference, e.g. `mygateway=http://gateway.example.internal:4000/v1`; the key for endpoint `<name>` comes from env `ROUTER_<NAME>_API_KEY` (none needed for a local server). 
+  - **Custom endpoints**: one `userConfig` list field `customEndpoints` (⚠️ declared `"type": "string", "multiple": true`; `string[]` fails validate), each entry `name=url` with an optional key reference, e.g. `mygateway=http://gateway.example.internal:4000/v1`; the key for endpoint `<name>` comes from env `ROUTER_CUSTOM_API_KEYS` as `name=key,...` (⚠️ Task 3: env names must be literals, so no per-endpoint variable; none needed for a local server). 
   - **Context windows**: built-in table for common OpenAI, Claude (`anthropic:`) and Z.ai GLM (`zai:`) models; optional `userConfig` list (`"multiple": true`) `contextWindows` entries `model=tokens`.
   - Nothing else is configurable (timeouts and limits have fixed defaults).
   - Invalid config → one clear message naming the field; the session keeps working.
@@ -137,12 +137,13 @@
 - Create: `hooks/config.ts`, `hooks/config.test.ts`
 - Modify: `.claude-plugin/plugin.json` (`userConfig`: `openaiApiKey`, `anthropicApiKey`, `zaiApiKey` sensitive; ⚠️ `customEndpoints`, `contextWindows` as `"type": "string", "multiple": true`)
 
-- [ ] write tests: env-only, `/config`-only, both (config wins), custom endpoint parsing `name=url`, its key from `ROUTER_<NAME>_API_KEY`, invalid entry → clear message naming the field
-- [ ] implement `loadConfig($)`
-- [ ] write test: a missing key error names the variable or `/config` field, never a value
-- [ ] ➕ write tests: empty `customEndpoints` list → no custom endpoints; malformed `name=url` entry skipped with a warning, no crash
-- [ ] ⚠️ write test: config comes only from `register` `options` + env (module reloads on `/config` change; no `$.config` reads)
-- [ ] run tests — must pass before Task 4
+- [x] write tests: env-only, `/config`-only, both (config wins), custom endpoint parsing `name=url`, its key from `ROUTER_<NAME>_API_KEY`, invalid entry → clear message naming the field
+- [x] implement `loadConfig($, options)` (⚠️ `$` holds only `env` reads; the test kit's `$` has no `env`, so tests pass a fake `$`)
+- [x] write test: a missing key error names the variable or `/config` field, never a value
+- [x] ➕ write tests: empty `customEndpoints` list → no custom endpoints; malformed `name=url` entry skipped with a warning, no crash
+- [x] ⚠️ write test: config comes only from `register` `options` + env (module reloads on `/config` change; no `$.config` reads)
+- [x] run tests — must pass before Task 4
+- [x] ➕ ⚠️ custom endpoint keys: `$.env.get` takes only literal names, so per-endpoint `ROUTER_<NAME>_API_KEY` is impossible; keys come from one env var `ROUTER_CUSTOM_API_KEYS=name=key,name2=key2`
 
 ### Task 4: Request builder and error module
 **Files:**
