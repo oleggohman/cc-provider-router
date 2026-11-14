@@ -50,6 +50,15 @@
 ## Solution Overview
 - One `turn.step` hook. Parses `e.model`; no known prefix → `return yield* next(e)` untouched (zero overhead for Max).
 - ⚠️ Routed model (changed by Task 1): run a **shadow step** — `next({ ...e, model: SHADOW_MODEL })` with a pending capture for this loop; the mod's `http.fetch` hook takes the engine's `/v1/messages` request for that loop (engine request: `init.compress` set, `x-claude-code-session-id` header; loop: `x-claude-code-agent-id` header, absent on main), answers it locally with a stub SSE body (never reaches the network), and the step drains the stub. The captured body gives system, tools (with `input_schema`), messages (with reminders) and `max_tokens`; first-party fields (`metadata`, `context_management`, `safeguards`, `thread`, `diagnostics`, `stream`, `thinking`) are dropped. Then call the provider with `$.http.fetch` (non-streaming), convert the reply to chunks, yield, return the result.
+- ⚠️ **Shadow safety — fail closed** (review round 4). A shadow request must never leave the machine:
+  - `SHADOW_MODEL` is a model id that does not exist (`provider-router-shadow`), so even a leaked request is rejected by Anthropic as an unknown model and bills nothing. Task 4 verifies live that the engine builds the same `tools` / `system` for this id as for a real model; if not, fall back to one documented real model and rely on the rules below alone.
+  - Strict match: engine request (`compress` set) AND `body.model === SHADOW_MODEL` AND loop key (`x-claude-code-agent-id`, `main` when absent) AND `messages.length` consistent with `e.messageCount`.
+  - Pending state: module-level `Map<loopKey, Pending>`; an entry lives until the shadow's `next()` stream has ended (also on error / abort / Esc), not just until the first hit. A second shadow for a key already pending is refused.
+  - Refuse, never pass: while any shadow is pending, every engine request for that loop, and every engine request with `body.model === SHADOW_MODEL` that matches no entry, is answered locally (stub for the match, a local non-retryable 400 `invalid_request_error` otherwise, so the engine does not retry or fall back and the step ends). Only requests that are clearly not shadows (the mod's own fetches; other loops' real-model requests) reach `next`. Answering without `next` also covers the engine's internal retries ("sends" inside one fetch).
+  - After a module reload (e.g. `/config` change) the map is empty; a stray shadow-model request is then refused by the rule above.
+  - The stub reports zero usage; its chunks are drained and never yielded; the hook's own chunks and result replace the step entirely.
+  - A debug counter `shadowLeaks` (shadow-model requests passed to `next`) is kept and must stay 0, plus `shadowRefused` (stray shadow requests refused locally); `/providers` shows both.
+  - `buildRequest` sets `max_tokens` from the routed model's limits, not from the captured value (the engine may size it oddly for an unknown model id).
 - Two adapters, each a plain function `complete(req, provider) → Reply` (no class hierarchy):
   - `anthropic`: request as is; only model id, base URL and key change. Serves `anthropic:` (`x-api-key`) and `zai:` (`Authorization: Bearer`); the provider table holds base URL + auth style, so a further Anthropic-compatible service is one table row.
   - `openai`: Anthropic ↔ Chat Completions translation; serves `openai:` and every `custom:<name>:`.
@@ -131,6 +140,7 @@
 - [ ] write tests: env-only, `/config`-only, both (config wins), custom endpoint parsing `name=url`, its key from `ROUTER_<NAME>_API_KEY`, invalid entry → clear message naming the field
 - [ ] implement `loadConfig($)`
 - [ ] write test: a missing key error names the variable or `/config` field, never a value
+- [ ] ➕ write tests: empty `customEndpoints` list → no custom endpoints; malformed `name=url` entry skipped with a warning, no crash
 - [ ] ⚠️ write test: config comes only from `register` `options` + env (module reloads on `/config` change; no `$.config` reads)
 - [ ] run tests — must pass before Task 4
 
@@ -139,11 +149,14 @@
 - Create: `hooks/request.ts`, `hooks/request.test.ts`, `hooks/shadow.ts`, `hooks/shadow.test.ts`, `hooks/errors.ts`, `hooks/errors.test.ts`
 - Create: `tests/fixtures/` (transcripts: text only, tool round-trip, images, documents, thinking blocks, subagent)
 
-- [ ] ➕ write tests for `shadow.ts`: the `http.fetch` hook captures only an engine `/v1/messages` request (`compress` set) for the pending loop (`x-claude-code-agent-id`, none on main), answers it with the stub SSE and never calls `next`; passes the mod's own fetches and other loops' requests through untouched; a step with no captured request ends with a clear error; two loops in parallel each get their own body
-- [ ] ➕ implement `shadow.ts` (`shadowStep($, e, next)` → captured body)
+- [ ] ➕ live check (spike harness, few short haiku-main runs): with `SHADOW_MODEL = provider-router-shadow`, the captured `tools` / `system` for main and a subagent equal those captured with `claude-haiku-4-5`; also record what the engine does with the unknown id before building the request (rejects it? shrinks `max_tokens` / thinking?); record in `spike/README.md`; if they differ, use the documented real model and note it (⚠️)
+- [ ] ➕ write tests for `shadow.ts` (strict match + fail closed, see Solution Overview). Every test asserts the hook beneath the mod (the network) was called **0 times** for shadow traffic: match answered with stub; header missing; a 2nd and 3rd engine request in the same step; a side request (other model, no tools) on a pending loop; a shadow-model request matching no entry; pending kept until the stream ends and cleared after (success, error, abort); a second shadow on an already-pending key refused; main + subagent pending at once; two instances of the same agent type in parallel; empty map after reload refuses a stray shadow request; a refused shadow step ends (400, no retry loop) and bumps `shadowRefused`
+- [ ] ➕ write tests: the stub's chunks are never yielded, its usage is zero, `shadowLeaks` stays 0; the mod's own fetches pass through
+- [ ] ➕ implement `shadow.ts` (`shadowStep($, e, next)` → captured body; `Map<loopKey, Pending>`; refuse rule; `shadowLeaks` counter)
 - [ ] ⚠️ write tests building the provider request from the captured body (system, tools, messages, `max_tokens`; first-party fields dropped; model replaced), including subagent tool sets
+- [ ] ➕ write tests (fixture): deferred tools / tool search (`defer_loading`, `tool_reference` blocks) are flattened or dropped for the OpenAI adapter and kept for Anthropic-compatible ones
 - [ ] implement `buildRequest(body, e)`
-- [ ] ⚠️ write tests for `errors.ts`: status → message, key stripping, stop reason `refusal` (`model_context_window_exceeded` for context-length errors)
+- [ ] ⚠️ write tests for `errors.ts`: status → message, key stripping, stop reason `refusal` (`model_context_window_exceeded` for context-length errors); a parent agent receives the `[provider-router]`-prefixed text from a refusal-stopped subagent step
 - [ ] implement `errors.ts`
 - [ ] run tests — must pass before Task 5
 
@@ -177,7 +190,8 @@
 - Modify: `hooks/register.ts`
 
 - [ ] write tests: window lookup (built-in table incl. a `zai:glm-*` id, `contextWindows` override, unknown); compact called from `turn.complete` after an 85% step on the main loop and never during `turn.step`; not called for a subagent; `{ skip }` respected; "context length exceeded" → message per loop type
-- [ ] ⚠️ implement `context.ts`: own per-loop usage tracking (routed usage does not reach `$.session.usage()`); `$.session.compact` from `turn.complete` wrapped in try/catch (throws in `-p`); README recommends `autoCompactWindow` in routed agent definitions
+- [ ] ➕ write test: compact is never called synchronously inside the `turn.complete` hook; it is scheduled with `$.clock.after` after `next(e)` returns
+- [ ] ⚠️ implement `context.ts`: own per-loop usage tracking (routed usage does not reach `$.session.usage()`); `$.session.compact` scheduled via `$.clock.after` after `turn.complete`'s `next(e)` returns, wrapped in try/catch (rejects mid-turn, throws in `-p`); README recommends `autoCompactWindow` in routed agent definitions
 - [ ] write tests for `/providers`: configured providers, key yes/no, on-demand model listing for Anthropic and OpenAI shapes, provider down
 - [ ] implement `/providers`
 - [ ] write a test that no log, status, state or reply in the whole suite contains a test key value; run `mcp__plugin-authoring__scan_secrets` on the repo
@@ -192,6 +206,8 @@
 - [ ] run smoke for Anthropic Platform, OpenAI Platform and Z.ai (`zai:glm-5.3`)
 - [ ] custom endpoint: start LiteLLM on a test Docker host, run smoke against it, then stop and remove the container
 - [ ] verify main session on Max and a subagent on another provider run in parallel in one session
+- [ ] ➕ zero-leak check in `scripts/smoke.sh`: after each run `shadowLeaks` is 0 and session usage / `/cost` shows no shadow-model or extra haiku entries; run for main routed, one routed subagent, and 2 routed subagents in parallel while main runs on Max
+- [ ] ➕ manual: transcript (`$.session.messages`) and `/cost` contain no stub text and no shadow-model entries
 - [ ] ➕ manual (from Task 1): Esc during a routed step ends it cleanly; interactive `/model <prefixed id>` accepted; `$.session.compact` from `turn.complete` works interactively
 
 ### Task 9: Verify acceptance criteria
