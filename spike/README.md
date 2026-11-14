@@ -8,7 +8,7 @@ writes JSON lines to `/private/tmp/claude/provider-spike/log.jsonl`. Experiments
 ```
 claude -p "<prompt>" --plugin-dir <repo>/spike --model <spike-model> [--allowedTools ...]
 claude plugin validate ./spike    # passes (directory-profile notes only: no README/LICENSE/icon at repo root)
-claude plugin test ./spike        # 1 pass, 0 fail
+claude plugin test ./spike        # 1 pass, 0 fail (test file since renamed spike.test-disabled.ts so the root mod's test run skips it)
 ```
 
 ## Key discovery: the "shadow step" (option (c), made to work per step)

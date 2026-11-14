@@ -125,12 +125,12 @@
 - Create: `.claude-plugin/plugin.json`, `hooks/hooks.json`, `hooks/register.ts`, `hooks/route.ts`, `hooks/route.test.ts`
 - Create: `package.json` (scripts: test, typecheck, validate), `.gitignore`, `LICENSE` (MIT), `README.md` stub
 
-- [ ] write tests for `parseModel()`: no prefix, `anthropic:`, `openai:`, `zai:` (and `zai:` with an empty id), `custom:<name>:`, ids containing `/` and `:`, unknown custom name, empty id
-- [ ] implement `parseModel()`
-- [ ] write test: unprefixed `turn.step` passes through to `next` unchanged
-- [ ] implement the `turn.step` hook skeleton (pass-through + dispatch stub)
-- [ ] ➕ tests read `$.turn.step(...)` with `.next()` until `done` (`stream.result` is undefined in the kit); op hooks answer `{ value }`; stub `clock.sleep`
-- [ ] run `claude plugin test .`, `tsc -p .`, `claude plugin validate .` — must pass before Task 3
+- [x] write tests for `parseModel()`: no prefix, `anthropic:`, `openai:`, `zai:` (and `zai:` with an empty id), `custom:<name>:`, ids containing `/` and `:`, unknown custom name, empty id
+- [x] implement `parseModel()`
+- [x] write test: unprefixed `turn.step` passes through to `next` unchanged
+- [x] implement the `turn.step` hook skeleton (pass-through + dispatch stub)
+- [x] ➕ tests read `$.turn.step(...)` with `.next()` until `done` (`stream.result` is undefined in the kit); op hooks answer `{ value }`; stub `clock.sleep`
+- [x] run `claude plugin test .`, `tsc -p .`, `claude plugin validate .` — must pass before Task 3
 
 ### Task 3: Configuration and keys
 **Files:**
