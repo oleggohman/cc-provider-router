@@ -3,7 +3,8 @@ import { raceCall, type Sleep } from './call.ts'
 import { toChunks, toResult } from './chunks.ts'
 import { loadConfig, missingKeyMessage, type Config } from './config.ts'
 import { errorChunks, localError } from './errors.ts'
-import { ANTHROPIC_ROWS, complete as anthropicComplete, type Fetch } from './providers/anthropic.ts'
+import { ANTHROPIC_ROWS, complete as anthropicComplete, type AdapterResult, type Fetch } from './providers/anthropic.ts'
+import { complete as openaiComplete, targetFor } from './providers/openai.ts'
 import { buildRequest } from './request.ts'
 import { parseModel, type Route } from './route.ts'
 import { shadowFetch, shadowStep } from './shadow.ts'
@@ -58,11 +59,19 @@ export async function* routedStep<E extends StepEvent>(
 ): AsyncGenerator<any, any, unknown> {
   const secrets = [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)]
   const name = label(route)
-  // Check the key before the shadow step: no engine work for a step that
-  // cannot be answered.
-  const row = route.provider === 'anthropic' || route.provider === 'zai' ? ANTHROPIC_ROWS[route.provider] : undefined
-  const key = route.provider === 'custom' ? undefined : cfg.keys[route.provider]
-  if (route.provider !== 'custom' && !key) return yield* errorChunks(e, localError(name, missingKeyMessage(route.provider), secrets))
+  // Check the key / endpoint before the shadow step: no engine work for a
+  // step that cannot be answered.
+  let send: (io: StepIO, built: ReturnType<typeof buildRequest>) => Promise<AdapterResult>
+  if (route.provider === 'anthropic' || route.provider === 'zai') {
+    const row = ANTHROPIC_ROWS[route.provider]
+    const key = cfg.keys[route.provider]
+    if (!key) return yield* errorChunks(e, localError(name, missingKeyMessage(route.provider), secrets))
+    send = (io, built) => anthropicComplete(io.fetch, built.request, row, key)
+  } else {
+    const t = targetFor(route, cfg)
+    if (!t.ok) return yield* errorChunks(e, localError(name, t.message, secrets))
+    send = (io, built) => openaiComplete(io.fetch, built.request, built.effort, t.target)
+  }
   let body: any
   try {
     body = await shadowStep(e, next)
@@ -70,13 +79,8 @@ export async function* routedStep<E extends StepEvent>(
     return yield* errorChunks(e, localError(name, `shadow request failed: ${String(err)}`, secrets))
   }
   const built = buildRequest(body, route, e)
-  if (!row || !key) {
-    // The OpenAI-compatible adapter arrives in Task 6. Until then a routed
-    // step ends with a clear error and never reaches the network.
-    return yield* errorChunks(e, localError(name, `adapter for ${name} not implemented yet`, secrets))
-  }
   if (!io) return yield* errorChunks(e, localError(name, 'no network access in this context', secrets))
-  const out = await raceCall(io.sleep, io.signal, () => anthropicComplete(io.fetch, built.request, row, key), io.timeoutMs)
+  const out = await raceCall(io.sleep, io.signal, () => send(io, built), io.timeoutMs)
   switch (out.kind) {
     case 'cancelled':
       return cancelled(e)

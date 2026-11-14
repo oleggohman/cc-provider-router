@@ -1,0 +1,319 @@
+import { describe, expect, test } from 'claude-code/testing'
+import { OPENAI_BASE, complete, isReasoningModel, targetFor } from './openai.ts'
+import { routedStep } from '../register.ts'
+import { SHADOW_MODEL, resetShadow, shadowFetch, shadowStats } from '../shadow.ts'
+
+// The test kit refuses `$.http.fetch` from a test's own hooks, so the adapter
+// takes a fetch function and the tests pass a counting stand-in for the
+// network. No live provider is ever called.
+
+const KEY = 'sk-proj-test-KEY-0123456789abcdef'
+const GW_KEY = 'gw-secret-key-0123456789abcdef'
+
+type Answer = { status: number; text: string }
+
+function provider(answers: Answer[]) {
+  const calls: { url: string; init: any }[] = []
+  const fetch = async (url: string, init: any) => {
+    calls.push({ url, init })
+    const a = answers[calls.length - 1] ?? answers[answers.length - 1]!
+    return { status: a.status, ok: a.status >= 200 && a.status < 300, headers: { 'content-type': 'application/json' }, text: a.text }
+  }
+  return { calls, fetch }
+}
+
+const REQ = {
+  model: 'gpt-5',
+  max_tokens: 128000,
+  system: [{ type: 'text', text: 'SYS' }],
+  messages: [{ role: 'user', content: 'hi' }],
+  tools: [{ name: 'Bash', description: 'run', input_schema: { type: 'object', properties: { command: { type: 'string' } } } }],
+}
+
+const OK_TEXT = JSON.stringify({
+  id: 'chatcmpl-1',
+  object: 'chat.completion',
+  model: 'gpt-5-2025-08-07',
+  choices: [{ index: 0, message: { role: 'assistant', content: 'Hello there' }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
+})
+
+const TOOL_TEXT = JSON.stringify({
+  model: 'gpt-5',
+  choices: [
+    {
+      index: 0,
+      message: { role: 'assistant', content: 'Running it.', tool_calls: [{ id: 'call_9', type: 'function', function: { name: 'Bash', arguments: '{"command":"ls"}' } }] },
+      finish_reason: 'tool_calls',
+    },
+  ],
+  usage: { prompt_tokens: 20, completion_tokens: 9 },
+})
+
+const OPENAI_T = { label: 'openai', baseUrl: OPENAI_BASE, key: KEY, reasoning: true }
+
+describe('openai adapter', () => {
+  test('success: POST <base>/chat/completions with Bearer key; Chat body; reply parsed', async () => {
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const r = await complete(p.fetch, REQ, 'medium', OPENAI_T)
+    expect(p.calls.length).toBe(1)
+    const { url, init } = p.calls[0]!
+    expect(url).toBe('https://api.openai.com/v1/chat/completions')
+    expect(init.method).toBe('POST')
+    expect(init.headers.authorization).toBe(`Bearer ${KEY}`)
+    expect(init.headers['content-type']).toBe('application/json')
+    expect(init.headers['x-api-key']).toBeUndefined()
+    // Never the session's own credential, never compressed like an engine request.
+    expect(init.auth).toBeUndefined()
+    expect(init.compress).toBeUndefined()
+    const sent = JSON.parse(init.body)
+    expect(sent.model).toBe('gpt-5')
+    expect(sent.messages).toEqual([
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'hi' },
+    ])
+    expect(sent.max_completion_tokens).toBe(128000)
+    expect(sent.reasoning_effort).toBe('medium')
+    expect(sent.tools[0]).toEqual({ type: 'function', function: { name: 'Bash', description: 'run', parameters: REQ.tools[0]!.input_schema } })
+    expect(sent.stream).toBeUndefined()
+    expect(sent.system).toBeUndefined()
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.reply.content).toEqual([{ type: 'text', text: 'Hello there' }])
+    expect(r.reply.stopReason).toBe('end_turn')
+    expect(r.reply.model).toBe('gpt-5-2025-08-07')
+    expect(r.reply.usage).toEqual({ input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
+  })
+
+  test('tool call reply', async () => {
+    const p = provider([{ status: 200, text: TOOL_TEXT }])
+    const r = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.reply.content).toEqual([
+      { type: 'text', text: 'Running it.' },
+      { type: 'tool_use', id: 'call_9', name: 'Bash', input: { command: 'ls' } },
+    ])
+    expect(r.reply.stopReason).toBe('tool_use')
+  })
+
+  test('401: clear error, refusal stop, the key never echoed', async () => {
+    const p = provider([{ status: 401, text: JSON.stringify({ error: { message: `Incorrect API key provided: ${KEY}`, type: 'invalid_request_error', code: 'invalid_api_key' } }) }])
+    const r = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.error.text.startsWith('[provider-router] openai error 401: authentication failed')).toBe(true)
+    expect(r.error.text).not.toContain(KEY)
+    expect(r.error.stopReason).toBe('refusal')
+  })
+
+  test('400 context length -> model_context_window_exceeded', async () => {
+    const p = provider([{ status: 400, text: JSON.stringify({ error: { message: "This model's maximum context length is 400000 tokens.", code: 'context_length_exceeded' } }) }])
+    const r = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    expect(!r.ok && r.error.stopReason).toBe('model_context_window_exceeded')
+  })
+
+  test('429 and 5xx', async () => {
+    const p = provider([
+      { status: 429, text: JSON.stringify({ error: { message: 'You exceeded your current quota' } }) },
+      { status: 503, text: 'upstream unavailable' },
+    ])
+    const a = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    const b = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    expect(!a.ok && a.error.text).toBe('[provider-router] openai error 429: rate limited or out of quota: You exceeded your current quota')
+    expect(!b.ok && b.error.text).toBe('[provider-router] openai error 503: provider unavailable: upstream unavailable')
+  })
+
+  test('200 with an error body or no choices: provider error / unreadable reply', async () => {
+    const p = provider([
+      { status: 200, text: JSON.stringify({ error: { message: 'model not loaded' } }) },
+      { status: 200, text: '<html>gateway</html>' },
+    ])
+    const a = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    const b = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    expect(!a.ok && a.error.text).toBe('[provider-router] openai error: model not loaded')
+    expect(!b.ok && b.error.text).toContain('[provider-router] openai error: unreadable reply')
+  })
+
+  test('custom endpoint with key: its own URL and Bearer key; no reasoning_effort', async () => {
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const r = await complete(p.fetch, { ...REQ, model: 'org/llama:v1' }, 'high', { label: 'custom:gw', baseUrl: 'http://gateway.example.internal:4000/v1', key: GW_KEY, reasoning: false })
+    expect(r.ok).toBe(true)
+    expect(p.calls[0]!.url).toBe('http://gateway.example.internal:4000/v1/chat/completions')
+    expect(p.calls[0]!.init.headers.authorization).toBe(`Bearer ${GW_KEY}`)
+    const sent = JSON.parse(p.calls[0]!.init.body)
+    expect(sent.model).toBe('org/llama:v1')
+    expect(sent.reasoning_effort).toBeUndefined()
+  })
+
+  test('custom endpoint without key: no Authorization header; errors name the endpoint', async () => {
+    const p = provider([
+      { status: 200, text: OK_TEXT },
+      { status: 404, text: JSON.stringify({ error: { message: 'model llama not found' } }) },
+    ])
+    const t = { label: 'custom:local', baseUrl: 'http://localhost:11434/v1', key: undefined, reasoning: false }
+    const r = await complete(p.fetch, REQ, undefined, t)
+    expect(r.ok).toBe(true)
+    expect('authorization' in p.calls[0]!.init.headers).toBe(false)
+    const e = await complete(p.fetch, REQ, undefined, t)
+    expect(!e.ok && e.error.text).toBe('[provider-router] custom:local error 404: not found (check the model id and base URL): model llama not found')
+  })
+})
+
+const CFG = (keys: Record<string, string>, custom: [string, { url: string; key: string | undefined }][] = []) =>
+  ({ keys, custom: new Map(custom), contextWindows: new Map(), warnings: [] }) as any
+
+describe('targetFor', () => {
+  test('openai: OpenAI Platform base and key; reasoning by model', async () => {
+    expect(targetFor({ provider: 'openai', model: 'gpt-5' }, CFG({ openai: KEY }))).toEqual({ ok: true, target: { label: 'openai', baseUrl: OPENAI_BASE, key: KEY, reasoning: true } })
+    const t = targetFor({ provider: 'openai', model: 'gpt-4o' }, CFG({ openai: KEY }))
+    expect(t.ok && t.target.reasoning).toBe(false)
+  })
+
+  test('openai without key: message names OPENAI_API_KEY and openaiApiKey', async () => {
+    const t = targetFor({ provider: 'openai', model: 'gpt-5' }, CFG({}))
+    expect(t.ok).toBe(false)
+    expect(!t.ok && t.message).toContain('OPENAI_API_KEY')
+    expect(!t.ok && t.message).toContain('openaiApiKey')
+  })
+
+  test('custom: url and optional key from config; unknown name names customEndpoints', async () => {
+    const cfg = CFG({}, [
+      ['gw', { url: 'https://gw.example/v1', key: GW_KEY }],
+      ['local', { url: 'http://localhost:1/v1', key: undefined }],
+    ])
+    expect(targetFor({ provider: 'custom', name: 'gw', model: 'm' }, cfg)).toEqual({ ok: true, target: { label: 'custom:gw', baseUrl: 'https://gw.example/v1', key: GW_KEY, reasoning: false } })
+    const l = targetFor({ provider: 'custom', name: 'local', model: 'm' }, cfg)
+    expect(l.ok && l.target.key).toBe(undefined)
+    const u = targetFor({ provider: 'custom', name: 'nope', model: 'm' }, cfg)
+    expect(!u.ok && u.message).toContain('nope')
+    expect(!u.ok && u.message).toContain('customEndpoints')
+  })
+
+  test('reasoning models', async () => {
+    for (const m of ['gpt-5', 'gpt-5-mini', 'gpt-5.1', 'o3', 'o4-mini', 'o1']) expect(isReasoningModel(m)).toBe(true)
+    for (const m of ['gpt-4o', 'gpt-4.1-mini', 'llama3', 'omni']) expect(isReasoningModel(m)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Routed step: shadow capture, then the adapter, through routedStep.
+
+const ZERO = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+// Engine stand-in: sends the shadow request through the mod's shadowFetch
+// (the network beneath counts calls and must stay at 0), then yields a chunk
+// that must never reach the caller.
+function engine() {
+  const network: any[] = []
+  const seen: any[] = []
+  const next = async function* (e: any): AsyncGenerator<any, any> {
+    seen.push(e)
+    const headers: Record<string, string> = { 'x-claude-code-session-id': 's1' }
+    if (e.agentId) headers['x-claude-code-agent-id'] = e.agentId
+    const body = {
+      model: e.model,
+      system: [{ type: 'text', text: 'CAPTURED-SYS' }],
+      tools: [{ name: 'Bash', description: 'run', input_schema: { type: 'object' } }],
+      messages: [{ role: 'user', content: 'list files' }],
+      max_tokens: 32000,
+      metadata: { user_id: 'u' },
+      thinking: { type: 'adaptive' },
+      stream: true,
+    }
+    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, (x: any) => {
+      network.push(x)
+      return { value: { status: 200, ok: true, headers: {}, text: '' } }
+    })
+    yield { kind: 'text', index: 0, text: 'ENGINE-STUB-CHUNK' }
+    yield { kind: 'stop', stopReason: 'end_turn', usage: ZERO }
+    return { turnId: e.turnId, index: e.index, answer: 'ENGINE-STUB-CHUNK', toolUses: [] }
+  }
+  return { network, seen, next }
+}
+
+const io = (fetch: any) => ({ fetch, sleep: (_ms: number, o?: { signal?: AbortSignal }) => new Promise<void>((_r, rej) => o?.signal?.addEventListener('abort', () => rej(new Error('aborted')))), signal: new AbortController().signal })
+
+async function drain(g: AsyncGenerator<any, any>) {
+  const chunks: any[] = []
+  let s = await g.next()
+  while (!s.done) {
+    chunks.push(s.value)
+    s = await g.next()
+  }
+  return { chunks, result: s.value }
+}
+
+const step = (model: string, over: any = {}) => ({ turnId: 't1', index: 0, model, messageCount: 3, effort: 'high', ...over })
+
+describe('routed step: openai and custom', () => {
+  test('openai: captured request translated and sent; tool call streamed as chunks; no shadow on the network', async () => {
+    resetShadow()
+    const eng = engine()
+    const p = provider([{ status: 200, text: TOOL_TEXT }])
+    const { chunks, result } = await drain(routedStep(step('openai:gpt-5'), eng.next, { provider: 'openai', model: 'gpt-5' }, CFG({ openai: KEY }), io(p.fetch)))
+    expect(eng.seen[0].model).toBe(SHADOW_MODEL)
+    expect(eng.network.length).toBe(0)
+    expect(p.calls.length).toBe(1)
+    expect(p.calls[0]!.url).toBe('https://api.openai.com/v1/chat/completions')
+    const sent = JSON.parse(p.calls[0]!.init.body)
+    expect(sent.model).toBe('gpt-5')
+    expect(sent.messages[0]).toEqual({ role: 'system', content: 'CAPTURED-SYS' })
+    expect(sent.tools[0].function.name).toBe('Bash')
+    expect(sent.max_completion_tokens).toBe(128000)
+    expect(sent.reasoning_effort).toBe('high')
+    expect(sent.metadata).toBeUndefined()
+    expect(sent.thinking).toBeUndefined()
+    expect(sent.stream).toBeUndefined()
+    expect(JSON.stringify(chunks)).not.toContain('ENGINE-STUB-CHUNK')
+    expect(chunks.map(c => c.kind)).toEqual(['text', 'tool', 'input', 'stop'])
+    expect(chunks[2]).toEqual({ kind: 'input', index: 1, json: '{"command":"ls"}' })
+    expect(result.toolUses).toEqual([{ name: 'Bash', input: { command: 'ls' } }])
+    expect(result.stopReason).toBe('tool_use')
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0 })
+  })
+
+  test('custom with key, subagent loop: endpoint URL and key used', async () => {
+    resetShadow()
+    const eng = engine()
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const cfg = CFG({}, [['gw', { url: 'https://gw.example/v1', key: GW_KEY }]])
+    const { result } = await drain(routedStep(step('custom:gw:org/m:v1', { agentId: 'sub-3' }), eng.next, { provider: 'custom', name: 'gw', model: 'org/m:v1' }, cfg, io(p.fetch)))
+    expect(eng.network.length).toBe(0)
+    expect(p.calls[0]!.url).toBe('https://gw.example/v1/chat/completions')
+    expect(p.calls[0]!.init.headers.authorization).toBe(`Bearer ${GW_KEY}`)
+    expect(JSON.parse(p.calls[0]!.init.body).model).toBe('org/m:v1')
+    expect(result.answer).toBe('Hello there')
+  })
+
+  test('custom error: key stripped from the reply', async () => {
+    resetShadow()
+    const p = provider([{ status: 401, text: `bad key ${GW_KEY}` }])
+    const cfg = CFG({}, [['gw', { url: 'https://gw.example/v1', key: GW_KEY }]])
+    const { chunks, result } = await drain(routedStep(step('custom:gw:m'), engine().next, { provider: 'custom', name: 'gw', model: 'm' }, cfg, io(p.fetch)))
+    expect(chunks[0].text.startsWith('[provider-router] custom:gw error 401')).toBe(true)
+    expect(JSON.stringify({ chunks, result })).not.toContain(GW_KEY)
+  })
+
+  test('unknown custom endpoint: clear error; no shadow, no provider call', async () => {
+    resetShadow()
+    const eng = engine()
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const { result } = await drain(routedStep(step('custom:nope:m'), eng.next, { provider: 'custom', name: 'nope', model: 'm' }, CFG({}), io(p.fetch)))
+    expect(eng.seen.length).toBe(0)
+    expect(p.calls.length).toBe(0)
+    expect(result.answer).toContain('[provider-router] custom:nope error')
+    expect(result.answer).toContain('customEndpoints')
+    expect(result.stopReason).toBe('refusal')
+  })
+
+  test('openai missing key: no shadow, no provider call', async () => {
+    resetShadow()
+    const eng = engine()
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const { result } = await drain(routedStep(step('openai:gpt-5'), eng.next, { provider: 'openai', model: 'gpt-5' }, CFG({}), io(p.fetch)))
+    expect(eng.seen.length).toBe(0)
+    expect(p.calls.length).toBe(0)
+    expect(result.answer).toContain('OPENAI_API_KEY')
+  })
+})

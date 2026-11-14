@@ -181,12 +181,13 @@
 **Files:**
 - Create: `hooks/translate.ts`, `hooks/translate.test.ts`, `hooks/providers/openai.ts`, `hooks/providers/openai.test.ts`
 
-- [ ] write tests for Anthropic → Chat Completions (system, text, images, documents, tool_use, tool_result with `is_error` and images, thinking dropped, tools, `max_completion_tokens`, `reasoning_effort`)
-- [ ] write tests for Chat Completions → reply (text, tool_calls, malformed args JSON, finish_reason mapping, usage, empty content)
-- [ ] implement `translate.ts`
-- [ ] write adapter tests with mocked `http.fetch`: success, tool call, 4xx/5xx, custom url with and without key
-- [ ] implement the adapter; wire `openai:` and `custom:<name>:`
-- [ ] run tests — must pass before Task 7
+- [x] write tests for Anthropic → Chat Completions (system, text, images, documents, tool_use, tool_result with `is_error` and images, thinking dropped, tools, `max_completion_tokens`, `reasoning_effort`)
+- [x] write tests for Chat Completions → reply (text, tool_calls, malformed args JSON, finish_reason mapping, usage, empty content)
+- [x] implement `translate.ts`
+- [x] write adapter tests with mocked `http.fetch`: success, tool call, 4xx/5xx, custom url with and without key
+- [x] implement the adapter; wire `openai:` and `custom:<name>:`
+- [x] run tests — must pass before Task 7
+- [x] ➕ malformed / empty / non-object tool-call arguments become `{}` (the tool's input check tells the model); `reasoning_effort` only for `openai:` reasoning models (`o*`, `gpt-5*`; xhigh/max → high), never for `custom:`; temperature/top_p dropped for reasoning models; a 200 body with an `error` object is reported as a provider error
 
 ### Task 7: Context windows and `/providers`
 **Files:**
