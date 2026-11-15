@@ -16,6 +16,7 @@ export type ChatRequest = {
   max_completion_tokens: number
   tools?: any[]
   tool_choice?: unknown
+  parallel_tool_calls?: boolean
   stop?: unknown
   temperature?: unknown
   top_p?: unknown
@@ -162,6 +163,9 @@ export function toChat(req: ProviderRequest, opts: ChatOptions): ChatRequest {
   if (tools.length) chat.tools = tools
   const tc = toolChoice(req.tool_choice)
   if (tc !== undefined) chat.tool_choice = tc
+  // One tool call per reply, as the captured request asked (only with tools:
+  // OpenAI rejects parallel_tool_calls without them).
+  if (tools.length && (req.tool_choice as any)?.disable_parallel_tool_use === true) chat.parallel_tool_calls = false
   if (req.stop_sequences !== undefined) chat.stop = req.stop_sequences
   if (opts.reasoning) {
     // Reasoning models reject custom sampling settings.

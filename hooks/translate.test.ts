@@ -195,6 +195,19 @@ describe('Anthropic -> Chat Completions', () => {
     expect(tc(undefined)).toBeUndefined()
   })
 
+  test('disable_parallel_tool_use -> parallel_tool_calls false, only with tools', async () => {
+    const tools = [{ name: 'Bash', input_schema: { type: 'object' } }]
+    const pc = (over: any) => toChat(base(over), { reasoning: false }).parallel_tool_calls
+    expect(pc({ tools, tool_choice: { type: 'auto', disable_parallel_tool_use: true } })).toBe(false)
+    expect(pc({ tools, tool_choice: { type: 'any', disable_parallel_tool_use: true } })).toBe(false)
+    expect(pc({ tools, tool_choice: { type: 'tool', name: 'Bash', disable_parallel_tool_use: true } })).toBe(false)
+    // Unset or false: the provider's default stands.
+    expect(pc({ tools, tool_choice: { type: 'auto' } })).toBeUndefined()
+    expect(pc({ tools, tool_choice: { type: 'auto', disable_parallel_tool_use: false } })).toBeUndefined()
+    // OpenAI rejects parallel_tool_calls without tools.
+    expect(pc({ tool_choice: { type: 'auto', disable_parallel_tool_use: true } })).toBeUndefined()
+  })
+
   test('sampling: temperature, top_p, stop kept for non-reasoning models; top_k dropped', async () => {
     const c = toChat(base({ temperature: 0.2, top_p: 0.9, top_k: 5, stop_sequences: ['X'] }), { reasoning: false })
     expect(c.temperature).toBe(0.2)
