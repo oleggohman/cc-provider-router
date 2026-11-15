@@ -18,7 +18,8 @@ are in `README.md`; the engine behaviour the design depends on is in
 - `hooks/shadow.ts`: captures the engine's request locally. `hooks/thread.ts`:
   per-loop conversation state for message-thread continues, body normalization.
 - `hooks/request.ts`, `hooks/translate.ts`, `hooks/providers/{anthropic,openai}.ts`:
-  request building and the two adapters. `hooks/chunks.ts`, `hooks/call.ts`,
+  request building and the two adapters. `hooks/limits.ts`: per-model
+  context windows and max output tokens (one prefix-matched table). `hooks/chunks.ts`, `hooks/call.ts`,
   `hooks/errors.ts`, `hooks/context.ts`, `hooks/providers-command.ts`.
 - `tests/harness.ts`, `tests/fixtures/`: shared test stand-ins and transcripts.
 - `scripts/smoke.sh`: live smoke tests. `examples/agents/`: routed subagents.
@@ -35,7 +36,18 @@ are in `README.md`; the engine behaviour the design depends on is in
 - **The shadow capture fails closed.** Do not weaken the rules in
   `hooks/shadow.ts` (strict match, one pending capture per loop held until the
   stream ends, refuse every unmatched shadow-model request, `shadowLeaks` must
-  stay 0). Any change there needs a test asserting zero network calls.
+  stay 0). Any change there needs a test asserting zero network calls. The
+  `http.fetch` hook carries a `.catch` (`shadowFetchFailed`) and the
+  `turn.step` hook a try/catch plus `.catch`: a failing hook must never let a
+  shadow request or a prefixed model reach the network or the engine.
+- **Thread-state invariants** (`hooks/thread.ts`, `routedStep`): a step that
+  reached the provider and failed is recorded with its error text as the
+  assistant turn; a cancelled step (Esc) records nothing; a step that failed
+  before its request was captured drops the loop's conversation (`dropBase`),
+  to be rebuilt from `$.session.messages({ as: 'api' })`. Breaking these
+  misaligns every later continue; any change needs `thread.test.ts` coverage.
+- The hooks module checker allows `$` only as `$.noun.call(...)` or passed to
+  a top-level function of this module (not a closure).
 - No secrets anywhere: not in code, tests, fixtures, logs, errors or commits.
   Tests use obvious fake keys; `hooks/secrets.test.ts` checks no output
   contains a key. Error text goes through `sanitize` / `redact` in
@@ -45,9 +57,21 @@ are in `README.md`; the engine behaviour the design depends on is in
 - Imports use the `.ts` extension. Code comments in English.
 - Conventional Commits, one logical change per commit.
 
+## Adding a provider
+
+- Anthropic-compatible: a row in `ANTHROPIC_ROWS` (`hooks/providers/anthropic.ts`).
+  OpenAI-compatible: a branch in `targetFor` (`hooks/providers/openai.ts`).
+- Its prefix in `SIMPLE` (`hooks/route.ts`) and the dispatch in `routedStep`.
+- Key: `KEY_SOURCES` plus a literal `$.env.get('<NAME>')` in `loadConfig`
+  (`hooks/config.ts`), and a `userConfig` field in `.claude-plugin/plugin.json`.
+- A row in `rows()` (`hooks/providers-command.ts`) for `/providers`.
+- Its models in `MODEL_LIMITS` (`hooks/limits.ts`).
+- README (keys table, limits) and a smoke case in `scripts/smoke.sh`.
+
 ## Commands
 
-Run sequentially, never in parallel:
+Run sequentially, never in parallel (also `npm test`, `npm run typecheck`,
+`npm run validate`):
 
 ```bash
 claude plugin test .                                                       # unit tests
@@ -57,7 +81,7 @@ scripts/smoke.sh                                                           # liv
 ```
 
 `claude plugin validate .` reports TS5097 warnings for `.ts` import paths in
-test files and missing author/icon; those are known and not failures.
+test files; those are known and not failures.
 `.claude-plugin/types/` is generated on first load and git-ignored.
 
 `scripts/smoke.sh` reads `ROUTER_ANTHROPIC_API_KEY`, `ZAI_API_KEY`,

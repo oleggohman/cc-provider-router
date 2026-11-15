@@ -12,13 +12,7 @@ releases: no fork, no proxy server, no `ANTHROPIC_BASE_URL` tricks.
 
 ## Quick start (60 seconds)
 
-1. Install the plugin (Claude Code 2.1.275 or later):
-
-   ```
-   /plugin install provider-router --marketplace oleggohman/cc-things
-   ```
-
-   or in two steps:
+1. Install the plugin (Claude Code 2.1.323 or later; tested on 2.1.323):
 
    ```
    /plugin marketplace add oleggohman/cc-things
@@ -83,7 +77,8 @@ claude --plugin-dir ./cc-provider-router --model zai:glm-5.3
 ## Configuration
 
 Only a key for each provider you use is needed. Everything else is optional,
-and there is nothing more: timeouts and limits have fixed defaults.
+and there is nothing more: timeouts and output limits have fixed defaults (see
+[Limits](#limits)).
 
 ### API keys
 
@@ -162,10 +157,16 @@ Keep API keys in env variables or `/config`, not in settings files.
 
 Claude Code assumes a 1M-token window for model ids it does not know, so on
 its own it would not compact a routed conversation in time. The router knows
-the windows of common models (GPT-5, GPT-4.1, GPT-4o, o3, o4-mini, Claude
-Opus / Sonnet / Haiku 4.x, GLM-4.6 / 5 / 5.3) and compacts a routed main
-session after a turn that used 85% of the window. For other models add
-`model=tokens` entries, with the full prefixed id, to the `/config` list field
+the windows of these model families, matched by id prefix (so dated and newer
+ids such as `openai:gpt-5.1` or `anthropic:claude-sonnet-4-6` are covered):
+`openai:gpt-5*` (400K; `gpt-5-chat*` 128K), `openai:gpt-4.1*` (~1M),
+`openai:gpt-4o*` (128K), `openai:o1*`, `o3*`, `o4-mini*` (200K; `o1-mini` 128K),
+`anthropic:claude-opus*`, `claude-sonnet*`, `claude-haiku*` (200K),
+`zai:glm*` (200K; `glm-4.5*` 128K). It compacts a routed main session after a
+turn that used 85% of the window. Automatic compaction needs an interactive
+session: under `claude -p` there is none, and a context-length error ends the
+step. `custom:` models and anything else need a `model=tokens` entry, with the
+full prefixed id (matched exactly), in the `/config` list field
 `contextWindows`:
 
 ```
@@ -174,12 +175,17 @@ openai:gpt-5.1=400000
 ```
 
 The router does not compact subagents. Set `autoCompactWindow` in a routed
-agent's definition (below) to a value under the model's real window.
+agent's definition (below) to a value under the model's real window. Claude
+Code accepts only 100000 to 1000000 there, so a subagent on a model with a
+smaller window (such as the 32K example above) cannot be covered: keep its
+tasks small.
 
 ### Invalid entries
 
-A malformed entry (for example a `customEndpoints` entry without `=`) is
-skipped and shown as a warning in `/providers`; the session keeps working.
+A malformed entry (for example a `customEndpoints` entry without `=`, or a
+URL with credentials in it, `https://user:pass@...`: put the key in
+`ROUTER_CUSTOM_API_KEYS` instead) is skipped and shown as a warning in
+`/providers`; the session keeps working.
 
 ## Model ids
 
@@ -191,7 +197,9 @@ custom:<name>:<model>     custom:litellm:my-model, custom:ollama:qwen3:32b
 anything else             your Claude subscription, untouched
 ```
 
-`<model>` goes to the provider as is and may contain `/` and `:`.
+`<model>` goes to the provider as is and may contain `/` and `:`. A router
+prefix with nothing usable after it (`openai:`, `custom:gw`) is answered with
+a `[provider-router]` error, never sent to your subscription.
 `/providers models` asks each configured provider for its models and lists
 them already prefixed, ready to copy.
 
@@ -257,18 +265,36 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
 ## Limits
 
 - **No streaming** for routed models: a reply appears when it is complete.
-- **No prompt caching, extended thinking or server tools** (web search, code
-  execution) on the translated providers (`openai:`, `custom:`). Thinking
-  blocks in the history are dropped. `effort` becomes `reasoning_effort` only
-  for OpenAI reasoning models (`o*`, `gpt-5*`).
+- **No extended thinking on any routed model**, and `effort` is ignored,
+  except that it becomes `reasoning_effort` for OpenAI reasoning models (`o*`,
+  `gpt-5*` except `gpt-5-chat*`). Thinking blocks in a reply are dropped.
+- **Prompt caching and server tools** (web search, code execution): the
+  request's cache breakpoints and tool definitions are passed to `anthropic:`
+  and `zai:` as Claude Code wrote them (at most 4 breakpoints), so whether
+  they work is up to the provider; not verified live. On `openai:` and
+  `custom:` neither is translated.
+- **Deferred tools** (tool search): a deferred tool is sent once it has been
+  loaded; until then it is left out, on every provider.
+- **Output limits are fixed per model** (`max_tokens`, by id prefix):
+  `openai:gpt-5*` 128000 (`gpt-5-chat*` 16384), `openai:gpt-4.1*` 32768,
+  `openai:gpt-4o*` 16384, `openai:o1*` / `o3*` / `o4-mini*` 100000
+  (`o1-mini` 65536), `anthropic:claude-opus*` 32000,
+  `anthropic:claude-sonnet*` / `claude-haiku*` 64000, `zai:glm*` 32768.
+  Everything else, including every `custom:` model, gets 8192, which is not
+  configurable: a very long file write on such a model can stop at the limit.
 - **Esc does not cancel a call already sent.** The step ends at once, but the
   provider still finishes the request and bills it. Provider timeout: 600 s.
 - **Your subscription is never routed** and never pays for a routed call. The
   router does not use your Claude sign-in.
 - **History in memory.** Claude Code sends a conversation as a thread (after
   the first request, only the new messages), so the router keeps each routed
-  conversation's history itself. A `/config` change or a plugin reload clears
-  it, and the next routed step says so: run `/clear` or `/compact`, then
+  conversation's history itself. When it has none for a step (after a step
+  that failed before its request was captured, Esc on a conversation's first
+  routed step, an engine fork such as compaction, a subagent resumed after
+  its turn ended, or a switch from a subscription model), it rebuilds it from
+  the session's own history. A `/config` change or a plugin reload clears the
+  system prompt and tools as well; then, or when the session cannot give the
+  history, the next routed step says so: run `/clear` or `/compact`, then
   continue.
 - **Errors** come back as the model's reply, prefixed `[provider-router]`,
   with stop reason `refusal` (Claude Code has no error stop reason), or
@@ -289,7 +315,9 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
 | OpenAI Platform (`openai:`) | unit-tested only; not live-verified at release |
 
 Not yet checked by hand in an interactive session: Esc during a routed step,
-and automatic compaction of a routed main session. Reports welcome.
+automatic compaction of a routed main session, and rebuilding a routed
+conversation from the session history (after `/model` from a subscription
+model, a compaction fork, or a resumed subagent). Reports welcome.
 
 ## Why not `ANTHROPIC_API_KEY`?
 
@@ -309,7 +337,8 @@ models use it.
 | `error 404` | wrong model id or base URL; compare with `/providers models` |
 | `error 429`, or `credit balance is too low` | rate limit, or no credit on the provider account |
 | `unknown custom endpoint "x"` | the name in `custom:<name>:` must match a `customEndpoints` entry |
-| `the conversation so far is not known to the router` | the plugin reloaded mid-conversation: run `/clear` or `/compact` |
+| `the conversation so far is not known to the router` | the plugin reloaded mid-conversation (or the history could not be rebuilt): run `/clear` or `/compact` |
+| `malformed model id "..."` | a router prefix with nothing after it (`openai:`, `custom:gw`): use `<prefix>:<model>` or `custom:<name>:<model>` |
 | context-length error in a subagent | the task was too large for the model: lower `autoCompactWindow` or split the task |
 | anything else | `/providers` (status, warnings, counters), `/providers models` (calls each provider), `claude --debug` |
 
@@ -348,11 +377,17 @@ SMOKE_CUSTOM_URL=http://localhost:4000/v1 SMOKE_CUSTOM_NAME=litellm \
   SMOKE_CUSTOM_MODEL=my-model ROUTER_CUSTOM_API_KEYS="litellm=sk-..." scripts/smoke.sh
 ```
 
-Other settings: `SMOKE_CASES` (any of `main sub parallel background`),
-`SMOKE_ONLY` (provider labels: `anthropic zai openai custom`),
-`SMOKE_ANTHROPIC_MODEL`, `SMOKE_ZAI_MODEL`, `SMOKE_OPENAI_MODEL`,
-`SMOKE_MAIN_MODEL`, `SMOKE_TIMEOUT`, `SMOKE_KEEP=1`. Conventions for
-contributors are in [CLAUDE.md](CLAUDE.md).
+Requirements: `claude`, `jq`, and `timeout` (GNU coreutils; on macOS
+`brew install coreutils` provides `gtimeout`, which the script uses). Other
+settings: `SMOKE_CASES` (any of `main turns switch sub parallel background
+errors`; default all), `SMOKE_ONLY` (provider labels: `anthropic zai openai
+custom`), `SMOKE_ANTHROPIC_MODEL` (default `claude-haiku-5-5`),
+`SMOKE_ZAI_MODEL` (default `glm-5.3`), `SMOKE_OPENAI_MODEL` (default
+`gpt-5-mini`), `SMOKE_CUSTOM_NAME` (default `smoke`), `SMOKE_MAIN_MODEL` (the
+subscription model for the subagent and switch cases; default your default
+model), `SMOKE_TIMEOUT` (seconds per session, default 600), `SMOKE_KEEP=1`.
+Transcripts are read from `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`.
+Conventions for contributors are in [CLAUDE.md](CLAUDE.md).
 
 ## License
 

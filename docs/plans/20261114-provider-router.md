@@ -8,7 +8,7 @@
   - `openai:<model>` → OpenAI Platform (`https://api.openai.com/v1`) Chat Completions, translated
   - `zai:<model>` → Z.ai (GLM models) through its Anthropic-compatible endpoint `https://api.z.ai/api/anthropic` (no translation; `Authorization: Bearer` key). Z.ai's OpenAI-compatible endpoints (`/api/paas/v4` pay-as-you-go, `/api/coding/paas/v4` Coding Plan) stay reachable as `custom:` entries if ever needed.
   - `custom:<name>:<model>` → any configured OpenAI-compatible endpoint (several allowed), translated
-- Main session stays on Max while subagents (via `model:` in their definition) or a `/model` switch use other providers.
+- Main session stays on Max while subagents (via `model:` in their definition) or a `/model` switch use other providers (`/model <prefixed id>` needs `ANTHROPIC_CUSTOM_MODEL_OPTION=<id>` on Claude Code 2.1.323; `--model`, settings `model` and agent `model:` work as is).
 - Runs on unmodified official Claude Code releases: no fork, upgrades need no merge. The plugin API (`claude-code` types) is the only dependency.
 - User requirements: **simple configuration**, **a good README**, TDD, and at the end a tagged release added to the `oleggohman/cc-things` marketplace.
 
@@ -109,16 +109,16 @@
 
 ### Task 1: Verification spike (go/no-go)
 **Files:**
-- Create: `spike/README.md` (findings), `spike/.claude-plugin/plugin.json`, `spike/hooks/hooks.json`, `spike/hooks/register.ts`
+- Create: `spike/README.md` (findings), `spike/.claude-plugin/plugin.json`, `spike/hooks/hooks.json`, `spike/hooks/register.ts` (spike removed in Task 10; its findings now live in `docs/design-notes.md`)
 
-- [x] **GO/NO-GO — tools** — GO via (c) as a per-step shadow request (see spike/README.md); (a), (b) fail; (d) not needed.: for a main-session step and a subagent step, find the exact tool names + JSON schemas the engine would send. Try in order: (a) `$.tool.list()` `inputSchema` for built-ins; (b) a `tool.list` / `tool.describe` hook; (c) an `http.fetch` hook beneath the engine reading the body of the engine's own request on an unprefixed step and caching tools per `agentId`/agent type — NOTE this never fires for a subagent defined with a routed `model:` (it makes no unprefixed step), so (c) alone is not a pass; (d) last resort: a hand-written schema table for core tools. Record which works; if none gives schemas for a subagent's tool set → ⚠️ stop and report to the user.
+- [x] **GO/NO-GO — tools** — GO via (c) as a per-step shadow request (see docs/design-notes.md); (a), (b) fail; (d) not needed.: for a main-session step and a subagent step, find the exact tool names + JSON schemas the engine would send. Try in order: (a) `$.tool.list()` `inputSchema` for built-ins; (b) a `tool.list` / `tool.describe` hook; (c) an `http.fetch` hook beneath the engine reading the body of the engine's own request on an unprefixed step and caching tools per `agentId`/agent type — NOTE this never fires for a subagent defined with a routed `model:` (it makes no unprefixed step), so (c) alone is not a pass; (d) last resort: a hand-written schema table for core tools. Record which works; if none gives schemas for a subagent's tool set → ⚠️ stop and report to the user.
 - [x] **GO/NO-GO — system prompt** — GO, same capture (system, tools, messages incl. reminders).: per step and per agent, from `prompt.compose`, the agent definition, or the engine request body (as above); include system reminders that `messages({as:'api'})` leaves out.
 - [x] verify a subagent with `model: spike-echo` in its definition reaches the hook with that model and its `agentId`
 - [x] verify a self-made `tool` + `input` + `stop{tool_use}` reply makes the engine run the tool and send a next step with the `tool_result`
 - [x] verify `$.http.fetch` POST with JSON body and headers, 4xx/5xx shape; verify `Promise.race` with `$.clock.sleep(ms, { signal: next.signal })` ends the step on Esc (race + `next.signal` verified; Esc itself skipped - not automatable in `-p`, check in Task 8)
 - [x] verify `claude plugin test` with `on('http.fetch')` beneath the mod intercepts the mod's own `$.http.fetch`
-- [x] verify `userConfig` with `sensitive: true` string and a string[] field; how `/model` accepts a prefixed id; whether `stop.usage` feeds the context meter; `$.session.compact` from a `turn.complete` hook (main loop) works; whether a routed subagent's own auto-compact token threshold can be set; whether a step can end with an error stop reason (else `refusal`); whether `$.config` returns live values after a `/config` change (results in spike/README.md; compact and interactive `/model` unverified in `-p`, moved to Task 8)
-- [x] write findings to `spike/README.md`; revise Tasks 2–7 here before continuing
+- [x] verify `userConfig` with `sensitive: true` string and a string[] field; how `/model` accepts a prefixed id; whether `stop.usage` feeds the context meter; `$.session.compact` from a `turn.complete` hook (main loop) works; whether a routed subagent's own auto-compact token threshold can be set; whether a step can end with an error stop reason (else `refusal`); whether `$.config` returns live values after a `/config` change (results in docs/design-notes.md; compact and interactive `/model` unverified in `-p`, moved to Task 8)
+- [x] write findings to `docs/design-notes.md`; revise Tasks 2–7 here before continuing
 
 ### Task 2: Plugin skeleton and model-id router
 **Files:**
@@ -137,7 +137,7 @@
 - Create: `hooks/config.ts`, `hooks/config.test.ts`
 - Modify: `.claude-plugin/plugin.json` (`userConfig`: `openaiApiKey`, `anthropicApiKey`, `zaiApiKey` sensitive; ⚠️ `customEndpoints`, `contextWindows` as `"type": "string", "multiple": true`)
 
-- [x] write tests: env-only, `/config`-only, both (config wins), custom endpoint parsing `name=url`, its key from `ROUTER_<NAME>_API_KEY`, invalid entry → clear message naming the field
+- [x] write tests: env-only, `/config`-only, both (config wins), custom endpoint parsing `name=url`, its key from `ROUTER_CUSTOM_API_KEYS` (`name=key,...`; see the last item of this task), invalid entry → clear message naming the field
 - [x] implement `loadConfig($, options)` (⚠️ `$` holds only `env` reads; the test kit's `$` has no `env`, so tests pass a fake `$`)
 - [x] write test: a missing key error names the variable or `/config` field, never a value
 - [x] ➕ write tests: empty `customEndpoints` list → no custom endpoints; malformed `name=url` entry skipped with a warning, no crash
@@ -150,7 +150,7 @@
 - Create: `hooks/request.ts`, `hooks/request.test.ts`, `hooks/shadow.ts`, `hooks/shadow.test.ts`, `hooks/errors.ts`, `hooks/errors.test.ts`
 - Create: `tests/fixtures/` (transcripts: text only, tool round-trip, images, documents, thinking blocks, subagent)
 
-- [x] ➕ live check (spike harness, few short haiku-main runs): with `SHADOW_MODEL = provider-router-shadow`, the captured `tools` / `system` for main and a subagent equal those captured with `claude-haiku-4-5`; also record what the engine does with the unknown id before building the request (rejects it? shrinks `max_tokens` / thinking?); record in `spike/README.md`; if they differ, use the documented real model and note it (⚠️) — done: names, schemas, system identical; descriptions/reminders use the newest-model wording; engine accepts the id (logs unrecognized_model), adaptive thinking + output_config added (dropped by buildRequest). Kept `provider-router-shadow`.
+- [x] ➕ live check (spike harness, few short haiku-main runs): with `SHADOW_MODEL = provider-router-shadow`, the captured `tools` / `system` for main and a subagent equal those captured with `claude-haiku-4-5`; also record what the engine does with the unknown id before building the request (rejects it? shrinks `max_tokens` / thinking?); record in `docs/design-notes.md`; if they differ, use the documented real model and note it (⚠️) — done: names, schemas, system identical; descriptions/reminders use the newest-model wording; engine accepts the id (logs unrecognized_model), adaptive thinking + output_config added (dropped by buildRequest). Kept `provider-router-shadow`.
 - [x] ➕ write tests for `shadow.ts` (strict match + fail closed, see Solution Overview). Every test asserts the hook beneath the mod (the network) was called **0 times** for shadow traffic: match answered with stub; header missing; a 2nd and 3rd engine request in the same step; a side request (other model, no tools) on a pending loop; a shadow-model request matching no entry; pending kept until the stream ends and cleared after (success, error, abort); a second shadow on an already-pending key refused; main + subagent pending at once; two instances of the same agent type in parallel; empty map after reload refuses a stray shadow request; a refused shadow step ends (400, no retry loop) and bumps `shadowRefused`
 - [x] ➕ write tests: the stub's chunks are never yielded, its usage is zero, `shadowLeaks` stays 0; the mod's own fetches pass through
 - [x] ➕ implement `shadow.ts` (`shadowStep($, e, next)` → captured body; `Map<loopKey, Pending>`; refuse rule; `shadowLeaks` counter)
@@ -170,7 +170,7 @@
 - [x] write tests for `toChunks()`/`toResult()`: text, tool calls, mixed, each stop reason, usage
 - [x] implement `chunks.ts`
 - [x] write tests for `call.ts`: success (timer aborted, no leftover sleep), timeout (error reply), Esc before reply (step ends cleanly, no error text, no unhandled rejection) — ⚠️ Esc simulated by aborting `next.signal` in tests; the real key is a Task 8 manual check
-- [x] implement `call.ts` (default timeout 600 s; live-checked that the racing sleep does not use up the 10 s hook budget, see spike/README.md)
+- [x] implement `call.ts` (default timeout 600 s; live-checked that the racing sleep does not use up the 10 s hook budget, see docs/design-notes.md)
 - [x] write adapter tests with mocked `http.fetch`: success, tool_use reply, 401, 429, 5xx
 - [x] implement the adapter (`POST <base>/v1/messages`, `anthropic-version`, auth per provider row); wire `anthropic:` and `zai:`; hook-level tests through `turn.step` for both (⚠️ kit: plugin-level `turn.step` tests cover key loading + shadow + no network; the success path runs through `routedStep` with injected fetch/sleep/signal, since the kit's mod instance cannot receive a shadow request from a test hook)
 - [x] write tests for the `zai:` row: Bearer header, base URL, Z.ai error body shape (mocked)
@@ -214,8 +214,8 @@
 - [x] custom endpoint: start LiteLLM on a test Docker host, run smoke against it, then stop and remove the container — ➕ done twice: (1) Z.ai's OpenAI-compatible API directly as `custom:zaioa:glm-5.3` (`https://api.z.ai/api/paas/v4`), all cases pass; (2) LiteLLM `v1.106.6` on the lab Docker host with a master key (keyed path via `ROUTER_CUSTOM_API_KEYS`), alias `smoke-glm` → Z.ai OpenAI-compatible; `/providers models` lists `custom:litellm:smoke-glm` (401 without key); all cases pass; container and image removed
 - [x] verify main session on Max and a subagent on another provider run in parallel in one session (`background` case: main's own Bash runs while the routed subagent is still working)
 - [x] ➕ zero-leak check in `scripts/smoke.sh`: after each run `shadowLeaks` is 0 and session usage / `/cost` shows no shadow-model or extra haiku entries; run for main routed, one routed subagent, and 2 routed subagents in parallel while main runs on Max — ⚠️ `modelUsage` always lists `provider-router-shadow` with 0 tokens / $0 (the engine accounts the stub); smoke asserts that entry is zero and no other model than the session's own appears
-- [ ] ➕ ⚠️ needs user, interactive: transcript (`$.session.messages`) and `/cost` contain no stub text and no shadow-model entries — transcript part automated (smoke scans the session JSONL: no shadow-model assistant entry, no refused-shadow text); interactive `/cost` left to the user
-- [ ] ➕ ⚠️ needs user, interactive (from Task 1): Esc during a routed step ends it cleanly; interactive `/model <prefixed id>` accepted; `$.session.compact` from `turn.complete` works interactively
+- [ ] ➕ ⚠️ deferred to the user (interactive): transcript (`$.session.messages`) and `/cost` contain no stub text and no shadow-model entries — transcript part automated (smoke scans the session JSONL: no shadow-model assistant entry, no refused-shadow text); interactive `/cost` left to the user
+- [ ] ➕ ⚠️ deferred to the user (interactive, from Task 1): Esc during a routed step ends it cleanly; interactive `/model <prefixed id>` accepted; `$.session.compact` from `turn.complete` works interactively
 - [x] ➕ ⚠️ found live: Claude Code 2.1.323 sends shadow requests as message threads (`thread: create`, then `continue` with only new messages, no tools, system = billing header) and with `role: "system"` messages carrying `tool_addition` / `tool_removal` blocks and a `DeferredToolPlaceholder` tool; step 2 of every routed loop failed (Z.ai 400 "messages parameter is illegal", Anthropic "tool_addition blocks require anthropic-beta"). Fix `hooks/thread.ts`: per-loop conversation state, continue rebuilt as state + delta, body normalized to plain Messages API; error steps recorded as the assistant turn, cancelled steps not; continue without state → clear error. `shadow.ts` unchanged. Tests in `hooks/thread.test.ts`.
 
 ### Task 9: Verify acceptance criteria
@@ -243,7 +243,9 @@
 *Informational only*
 
 **Manual verification**:
-- interactive session: `/model openai:<id>` and back; a subagent fan-out across three providers
+- after review 1: a routed conversation rebuilt from `$.session.messages({ as: 'api' })` (switch from a subscription model to a routed one, `/compact` on a routed main session, a resumed routed subagent) — unit-tested with stand-ins only
+- known test gap: the `turn.complete` hook's `$.clock.after` / `$.session.compact` wiring runs only through stand-ins (`maybeCompact` deps); the kit cannot compact
+- interactive session: `/model openai:<id>` (with `ANTHROPIC_CUSTOM_MODEL_OPTION=openai:<id>`) and back; a subagent fan-out across three providers
 - token usage on each provider's dashboard matches expectations
 
 **Maintenance**:
