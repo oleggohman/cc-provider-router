@@ -1,0 +1,10 @@
+{
+  "name": "fetch-observer",
+  "version": "0.0.1",
+  "description": "Test-only mod: records every http.fetch request it sees to a file and passes it on. Used by scripts/probes and the auto-mode check to see what left provider-router.",
+  "license": "MIT",
+  "author": { "name": "cc-provider-router contributors" },
+  "userConfig": {
+    "logFile": { "type": "string", "title": "Log file", "description": "Absolute path of the JSON-lines record. Overrides env FETCH_OBSERVER_LOG.", "required": false }
+  }
+}
