@@ -20,6 +20,7 @@
 // with `return()`; curl's own `max-time` is the backstop.
 
 import type { Fetch, FetchInit, FetchResponse, Sleep } from './call.ts'
+import { KEY_SOURCES } from './config.ts'
 import { sanitize } from './errors.ts'
 
 export type SpawnRequest = { argv: readonly string[]; input?: string; env?: Record<string, string> }
@@ -44,8 +45,9 @@ export const CONFIG_LINE_LIMIT = 10_000_000
 export const STATUS_MARK = '\n@@provider-router-status@@'
 
 // Variables blanked in the child's environment: the router's key sources (the
-// child never needs them) and the TLS key log (session secrets to a file).
-const BLANKED_ENV = ['OPENAI_API_KEY', 'ROUTER_ANTHROPIC_API_KEY', 'ZAI_API_KEY', 'ROUTER_CUSTOM_API_KEYS', 'SSLKEYLOGFILE'] as const
+// child never needs them; the provider keys from the key table, so a new
+// provider's is blanked too) and the TLS key log (session secrets to a file).
+export const BLANKED_ENV: readonly string[] = [...Object.values(KEY_SOURCES).map(s => s.env), 'ROUTER_CUSTOM_API_KEYS', 'SSLKEYLOGFILE']
 
 // RFC 9110 token.
 const TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
 import { providerSend } from './answer.ts'
-import { loadConfig, missingKeyMessage, secretsOf } from './config.ts'
+import { KEY_SOURCES, loadConfig, missingKeyMessage, secretsOf } from './config.ts'
 import { localError, providerError } from './errors.ts'
 import { listModels, providersCommand } from './providers-command.ts'
 import { routedStep } from './register.ts'
@@ -153,6 +153,8 @@ describe('no key value in any output', () => {
     expect(requests.length).toBe(ROUTES.length)
     for (const req of requests) {
       assertClean('argv and env', [req.argv, req.env ?? {}])
+      // Every key source's env variable is blanked, so an inherited key never reaches the child.
+      for (const s of Object.values(KEY_SOURCES)) expect(req.env?.[s.env]).toBe('')
       // The key did go to curl, on stdin.
       expect(ALL.some(k => req.input?.includes(k))).toBe(true)
     }

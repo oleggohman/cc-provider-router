@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
+import { KEY_SOURCES } from './config.ts'
 import {
+  BLANKED_ENV,
   CURL_ARGV,
   CONFIG_LINE_LIMIT,
   CurlStartError,
@@ -136,9 +138,19 @@ describe('curlFetch: argv and config', () => {
     const s = fakeSpawn()
     await curlFetch(s.spawn, opts({ env: { HOME: '/tmp/x', CURL_HOME: '/tmp/x' } }))(URL_OK, INIT())
     const env = s.calls[0]!.env!
-    for (const n of ['OPENAI_API_KEY', 'ROUTER_ANTHROPIC_API_KEY', 'ZAI_API_KEY', 'ROUTER_CUSTOM_API_KEYS', 'SSLKEYLOGFILE']) expect(env[n]).toBe('')
+    for (const n of ['OPENAI_API_KEY', 'ROUTER_ANTHROPIC_API_KEY', 'ZAI_API_KEY', 'XAI_API_KEY', 'ROUTER_CUSTOM_API_KEYS', 'SSLKEYLOGFILE']) expect(env[n]).toBe('')
     expect(env.HOME).toBe('/tmp/x')
     expect(JSON.stringify(env).includes(FAKE_KEY)).toBe(false)
+  })
+
+  test('the child env blanks the env variable of every key source (a new provider is blanked without a change here)', async () => {
+    const s = fakeSpawn()
+    await curlFetch(s.spawn, opts({ env: { HOME: '/tmp/x' } }))(URL_OK, INIT())
+    const env = s.calls[0]!.env!
+    const sources = Object.values(KEY_SOURCES).map(k => k.env)
+    expect(sources.length).toBeGreaterThan(0)
+    for (const n of sources) expect(env[n]).toBe('')
+    for (const n of [...sources, 'ROUTER_CUSTOM_API_KEYS', 'SSLKEYLOGFILE']) expect(BLANKED_ENV.includes(n)).toBe(true)
   })
 
   test('a key passed through opts.env is refused before curl starts', async () => {
