@@ -11,10 +11,15 @@
 #                                ROUTER_CUSTOM_API_KEYS="<name>=<key>"
 # Optional: SMOKE_ANTHROPIC_MODEL, SMOKE_ZAI_MODEL, SMOKE_OPENAI_MODEL,
 #   SMOKE_CUSTOM_NAME (default smoke), SMOKE_CUSTOM_MODEL (required with the URL),
-#   SMOKE_MAIN_MODEL (main-on-subscription model for subagent cases; default:
-#   your default model), SMOKE_CASES (space-separated subset of: main sub
-#   parallel background; default all), SMOKE_ONLY (space-separated provider
-#   labels to run, e.g. "zai custom"), SMOKE_KEEP=1 keeps the output dir.
+#   SMOKE_MAIN_MODEL (main-on-subscription model for the subagent cases and
+#   the switch case's middle turn; default: your default model, `haiku` for
+#   switch), SMOKE_CASES (space-separated subset of: main turns switch sub
+#   parallel background errors; default all), SMOKE_ONLY (space-separated
+#   provider labels to run, e.g. "zai custom"), SMOKE_TIMEOUT (seconds per
+#   session, default 600), SMOKE_KEEP=1 keeps the output dir.
+# Needs claude, jq and timeout (GNU coreutils; gtimeout on macOS via
+# `brew install coreutils`). Transcripts are read from
+# ${CLAUDE_CONFIG_DIR:-~/.claude}/projects.
 #
 # Every case asserts: the reply carries the marker, the marker came from a
 # real Bash tool run, routed steps were answered by the routed model, and the
@@ -28,6 +33,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 command -v claude >/dev/null || { echo "claude not found"; exit 2; }
 command -v jq >/dev/null || { echo "jq not found"; exit 2; }
+if command -v timeout >/dev/null; then TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null; then TIMEOUT_BIN=gtimeout
+else echo "timeout not found (GNU coreutils; on macOS: brew install coreutils)"; exit 2; fi
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 SHADOW=provider-router-shadow
 ANTHROPIC_MODEL="${SMOKE_ANTHROPIC_MODEL:-claude-haiku-5-5}"
@@ -36,7 +45,7 @@ OPENAI_MODEL="${SMOKE_OPENAI_MODEL:-gpt-5-mini}"
 CUSTOM_NAME="${SMOKE_CUSTOM_NAME:-smoke}"
 CUSTOM_URL="${SMOKE_CUSTOM_URL:-}"
 CUSTOM_MODEL="${SMOKE_CUSTOM_MODEL:-}"
-CASES="${SMOKE_CASES:-main sub parallel background}"
+CASES="${SMOKE_CASES:-main turns switch sub parallel background errors}"
 TIMEOUT="${SMOKE_TIMEOUT:-600}"
 
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/provider-router-smoke.XXXXXX")"
@@ -113,11 +122,41 @@ run() {
     jq -nc '{type: "user", message: {role: "user", content: "/providers"}}'
     i=0
     while [ "$i" -lt 120 ] && ! grep -q 'shadowLeaks' "$OUT/$name.raw"; do sleep 2; i=$((i + 2)); done
-  } | timeout "$TIMEOUT" claude -p --plugin-dir "$ROOT" --settings "$SETTINGS" --agents "$AGENTS" \
+  } | "$TIMEOUT_BIN" "$TIMEOUT" claude -p --plugin-dir "$ROOT" --settings "$SETTINGS" --agents "$AGENTS" \
     --input-format stream-json --output-format stream-json --verbose \
     --allowedTools Bash,Agent "$@" >"$OUT/$name.raw" 2>"$OUT/$name.err"
   grep '^{' "$OUT/$name.raw" >"$OUT/$name.jsonl" || true
 }
+
+results_count() { local c; c="$(grep -c '"type":"result"' "$1" 2>/dev/null)"; echo "${c:-0}"; }
+
+# run_turns <name> [claude args...]: one session sending each entry of TURNS
+# in order, each once the previous one has a result (a slash command waits at
+# most 30 s), then /providers as in run.
+run_turns() {
+  local name="$1"; shift
+  : >"$OUT/$name.raw"
+  {
+    local n=0 t i limit
+    for t in "${TURNS[@]}"; do
+      n=$((n + 1))
+      jq -nc --arg c "$t" '{type: "user", message: {role: "user", content: $c}}'
+      limit="$TIMEOUT"; case "$t" in /*) limit=30 ;; esac
+      i=0
+      while [ "$i" -lt "$limit" ] && [ "$(results_count "$OUT/$name.raw")" -lt "$n" ]; do sleep 2; i=$((i + 2)); done
+    done
+    jq -nc '{type: "user", message: {role: "user", content: "/providers"}}'
+    i=0
+    while [ "$i" -lt 120 ] && ! grep -q 'shadowLeaks' "$OUT/$name.raw"; do sleep 2; i=$((i + 2)); done
+  } | "$TIMEOUT_BIN" "$TIMEOUT" claude -p --plugin-dir "$ROOT" --settings "$SETTINGS" --agents "$AGENTS" \
+    --input-format stream-json --output-format stream-json --verbose \
+    --allowedTools Bash,Agent "$@" >"$OUT/$name.raw" 2>"$OUT/$name.err"
+  grep '^{' "$OUT/$name.raw" >"$OUT/$name.jsonl" || true
+}
+
+# Model-usage keys allowed besides the session's own (a regex; the switch
+# case adds the subscription model).
+ALLOW_USAGE='^$'
 
 # check <name> <routed model ids, space-separated> <main is routed: 0|1> <markers...>
 check() {
@@ -126,6 +165,7 @@ check() {
   [ -s "$f" ] || { fail "$name" "no output (see stderr: $(head -c 300 "$OUT/$name.err" | tr '\n' ' '))"; return; }
   local reply; reply="$(jq -r 'select(.type=="result") | .result' "$f")"
   local results; results="$(jq -r 'select(.type=="user") | .message.content[]? | select(.type=="tool_result") | (.content | if type=="string" then . else (map(.text? // "") | join(" ")) end)' "$f")"
+  case "$reply" in *"[provider-router]"*) err="$err a reply is a [provider-router] error;" ;; esac
   for m in "$@"; do
     case "$reply" in *"$m"*) ;; *) err="$err reply lacks $m;" ;; esac
     case "$results" in *"$m"*) ;; *) err="$err no tool result with $m;" ;; esac
@@ -140,11 +180,11 @@ check() {
   # Zero leak: counters, usage, transcript.
   jq -r 'select(.type=="result") | .result' "$f" | grep -q 'shadowLeaks 0,' || err="$err shadowLeaks not 0 (or /providers missing);"
   local mainModel; mainModel="$(jq -r 'select(.type=="system" and .subtype=="init") | .model' "$f" | head -1)"
-  local bad; bad="$(jq -r --arg main "$mainModel" --arg sh "$SHADOW" 'select(.type=="result") | .modelUsage // {} | to_entries[]
-      | select(.key != $main and (.key != $sh or (.value.inputTokens + .value.outputTokens + .value.cacheReadInputTokens + .value.cacheCreationInputTokens) > 0 or .value.costUSD > 0)) | .key' "$f" | sort -u | tr '\n' ' ')"
+  local bad; bad="$(jq -r --arg main "$mainModel" --arg sh "$SHADOW" --arg allow "$ALLOW_USAGE" 'select(.type=="result") | .modelUsage // {} | to_entries[]
+      | select(.key != $main and ((.key | test($allow)) | not) and (.key != $sh or (.value.inputTokens + .value.outputTokens + .value.cacheReadInputTokens + .value.cacheCreationInputTokens) > 0 or .value.costUSD > 0)) | .key' "$f" | sort -u | tr '\n' ' ')"
   [ -z "$bad" ] || err="$err unexpected usage entries: $bad;"
   local sid; sid="$(jq -r 'select(.type=="result") | .session_id' "$f" | head -1)"
-  local tr; tr="$(ls "$HOME"/.claude/projects/*/"$sid".jsonl 2>/dev/null | head -1)"
+  local tr; tr="$(ls "$CONFIG_DIR"/projects/*/"$sid".jsonl 2>/dev/null | head -1)"
   if [ -n "$tr" ]; then
     local dirty; dirty="$(cat "$tr" "$(dirname "$tr")/$sid"/subagents/*.jsonl 2>/dev/null \
       | jq -r --arg sh "$SHADOW" 'select(.type=="assistant" and .message.model==$sh) | "shadow-model assistant entry"' | head -1)"
@@ -153,6 +193,17 @@ check() {
   else
     err="$err transcript for session not found;"
   fi
+  if [ -z "$err" ]; then pass "$name"; else fail "$name" "$err"; fi
+}
+
+# check_error <name> <expected text>: a step answered locally with a
+# [provider-router] error, and the zero-leak counters.
+check_error() {
+  local name="$1" expect="$2" f="$OUT/$1.jsonl" err=""
+  [ -s "$f" ] || { fail "$name" "no output (see stderr: $(head -c 300 "$OUT/$name.err" | tr '\n' ' '))"; return; }
+  local reply; reply="$(jq -r 'select(.type=="result") | .result' "$f")"
+  case "$reply" in *"[provider-router]"*"$expect"*) ;; *) err="$err reply lacks [provider-router] ... $expect;" ;; esac
+  printf '%s' "$reply" | grep -q 'shadowLeaks 0,' || err="$err shadowLeaks not 0 (or /providers missing);"
   if [ -z "$err" ]; then pass "$name"; else fail "$name" "$err"; fi
 }
 
@@ -169,6 +220,42 @@ for c in $CASES; do
         run "main-$1" "Use the Bash tool to run \`echo $mk\` and reply with only its output." "$mk" --model "$2"
         check "main-$1" "$2" 1 "$mk"
       done
+      ;;
+    turns)
+      # Routed main session over two user turns: the second continues the
+      # thread across turns.
+      for p in "${PROVIDERS[@]}"; do
+        set -- $p
+        u="$(echo "$1" | tr a-z A-Z)"
+        TURNS=("Use the Bash tool to run \`echo SMOKE_T1_$u\` and reply with only its output." \
+          "Now use the Bash tool to run \`echo SMOKE_T2_$u\` and reply with only its output.")
+        run_turns "turns-$1" --model "$2"
+        check "turns-$1" "$2" 1 "SMOKE_T1_$u" "SMOKE_T2_$u"
+      done
+      ;;
+    switch)
+      # Routed -> subscription -> routed in one session with /model (a
+      # prefixed id needs ANTHROPIC_CUSTOM_MODEL_OPTION). The last routed
+      # step continues a thread the router did not see: it is rebuilt from
+      # the session history.
+      set -- ${PROVIDERS[0]}
+      u="$(echo "$1" | tr a-z A-Z)"
+      TURNS=("Use the Bash tool to run \`echo SMOKE_SW1_$u\` and reply with only its output." \
+        "/model ${SMOKE_MAIN_MODEL:-haiku}" \
+        "Use the Bash tool to run \`echo SMOKE_SW2_$u\` and reply with only its output." \
+        "/model $2" \
+        "Use the Bash tool to run \`echo SMOKE_SW3_$u\` and reply with only its output.")
+      export ANTHROPIC_CUSTOM_MODEL_OPTION="$2"
+      run_turns switch --model "$2"
+      unset ANTHROPIC_CUSTOM_MODEL_OPTION
+      ALLOW_USAGE='^claude-'
+      check switch "$2" 1 "SMOKE_SW1_$u" "SMOKE_SW2_$u" "SMOKE_SW3_$u"
+      ALLOW_USAGE='^$'
+      ;;
+    errors)
+      # Errors answered locally, at no cost: an unknown custom endpoint.
+      run errors-endpoint "Say hi." "unknown custom endpoint" --model "custom:smoke-missing:m"
+      check_error errors-endpoint 'unknown custom endpoint "smoke-missing"'
       ;;
     sub)
       # Main on the subscription, one routed subagent per provider.
