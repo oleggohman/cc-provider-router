@@ -38,6 +38,12 @@ describe('statusText', () => {
     expect(t).not.toContain(OA)
   })
 
+  test('the circuit breaker: shown when routing is off, absent otherwise', () => {
+    expect(statusText(cfg({}), { ...STATS, blind: true })).toContain('routing is off')
+    expect(statusText(cfg({}), { ...STATS, blind: false })).not.toContain('routing is off')
+    expect(statusText(cfg({}), STATS)).not.toContain('routing is off')
+  })
+
   test('no custom endpoints: says so', () => {
     expect(statusText(cfg({}), STATS)).toContain('custom: none')
   })

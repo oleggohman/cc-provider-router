@@ -611,11 +611,18 @@ describe('routed steps across a thread', () => {
 
   test('an early error with no captured request drops the conversation; the next continue is rebuilt from history', async () => {
     resetShadow()
-    // Step 1's shadow is never captured (the engine sends nothing).
+    // Step 1's shadow is never captured (the engine's one request does not
+    // match and is refused).
     let i = 0
     const inner = threadEngine([createBody, continueBody])
     const next = async function* (ev: any): AsyncGenerator<any, any> {
-      if (i++ === 1) return { turnId: ev.turnId, index: ev.index, answer: '', toolUses: [] }
+      if (i++ === 1) {
+        const out: any = await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers: { 'x-claude-code-session-id': 's1' }, compress: 'gzip', body: JSON.stringify({ model: ev.model, messages: [] }) } }, () => {
+          throw new Error('network')
+        })
+        expect(out.value.status).toBe(400)
+        return { turnId: ev.turnId, index: ev.index, answer: '', toolUses: [] }
+      }
       return yield* inner.next(ev)
     }
     const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])

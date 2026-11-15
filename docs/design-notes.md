@@ -72,7 +72,16 @@ models.
 - `shadowLeaks` (shadow-model requests that got past every engine-request
   rule to the last guard, and were refused there) must stay 0;
   `shadowRefused` counts stray requests refused locally. `/providers` shows
-  both.
+  both;
+- circuit breaker: the engine's types say that where the organization's guard
+  loads, only the guard's own mods see engine requests. The mod's hook then
+  never runs and the shadow request goes to the first-party API (rejected
+  for the unknown id, but the content has left the machine). A shadow step
+  that ends uncaptured, without Esc, while the hook saw no engine request at
+  all sets a module-level flag; every later shadow step is refused before
+  `next` is called, until the module reloads. The first such request cannot
+  be stopped from inside the mod. `/providers` shows `routing is off`. Not
+  reproduced live (no organization guard to test with).
 
 ## Message threads (found in the live smoke tests)
 

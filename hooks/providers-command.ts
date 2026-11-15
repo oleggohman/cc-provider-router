@@ -12,7 +12,8 @@ import { customLabel } from './route.ts'
 
 export type ListFetch = (url: string, init: { method: 'GET'; headers: Record<string, string> }) => Promise<FetchResponse>
 
-export type ShadowCounters = { shadowLeaks: number; shadowRefused: number }
+// `blind`: the shadow circuit breaker is set (shadow.ts), routing is off.
+export type ShadowCounters = { shadowLeaks: number; shadowRefused: number; blind?: boolean }
 
 // A built-in provider (`keyed`) needs a key; a custom endpoint may run
 // without one. `anthropic` rows carry their auth header kind.
@@ -56,6 +57,7 @@ export function statusText(cfg: Config, stats: ShadowCounters): string {
   }
   if (cfg.custom.size === 0) lines.push('  custom: none (add name=url to the /config field customEndpoints)')
   lines.push(`shadow: shadowLeaks ${stats.shadowLeaks}, shadowRefused ${stats.shadowRefused}`)
+  if (stats.blind) lines.push("routing is off: this plugin cannot see the engine's requests (an organization guard may hide them); restart Claude Code to retry")
   for (const w of cfg.warnings) lines.push(`warning: ${w}`)
   lines.push('Run /providers models to list each provider\'s models.')
   return redact(lines.join('\n'), secretsOf(cfg))

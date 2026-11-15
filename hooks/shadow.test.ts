@@ -94,7 +94,7 @@ describe('routed step with the shadow capture', () => {
     expect(JSON.stringify(chunks)).not.toContain('ENGINE-STUB-CHUNK')
     expect(result.answer).not.toContain('ENGINE-STUB-CHUNK')
     expect(result.answer).not.toContain('sk-test-secret')
-    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0 })
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false })
   })
 
   test('agent header missing: refused locally (400, no retry), step ends with an error', async () => {
@@ -450,6 +450,100 @@ describe('http.fetch .catch (shadowFetch failed before deciding)', () => {
     const out: any = await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5' }), caught(net, false))
     expect(out.value.text).toBe('{"network":true}')
     expect(net.calls.length).toBe(1)
+  })
+})
+
+describe('blind capture: the http.fetch hook never sees the engine request', () => {
+  // An engine whose request goes out without passing this mod's hook (an
+  // organization guard that hides engine requests from other mods): it sends
+  // to the network directly and fails on the unknown model.
+  function blindEngine(net: ReturnType<typeof network>) {
+    const seen: any[] = []
+    const next = async function* (e: any): AsyncGenerator<any, any> {
+      seen.push(e)
+      net.next(fetchEvent({ agent: e.agentId, messages: e.messageCount }))
+      throw new Error('404 model not found')
+    }
+    return { seen, next }
+  }
+
+  const counting = (signal = new AbortController().signal) => {
+    const calls: any[] = []
+    return { calls, io: { ...io(signal), fetch: async (...a: any[]) => (calls.push(a), { status: 500, ok: false, text: '{}' }) } }
+  }
+
+  test('one unseen shadow turns routing off: later routed steps never call next and make no network call', async () => {
+    resetShadow()
+    const net = network()
+    const eng = blindEngine(net)
+    const p = counting()
+    const first = await drain(routedStep(step(), eng.next, ROUTE, CFG, p.io, new Map()))
+    expect(first.result.answer).toContain('not captured')
+    expect(first.result.answer).toContain('routing is off')
+    expect(shadowStats().blind).toBe(true)
+    expect(net.calls.length).toBe(1) // the one the guard let through, before the breaker
+    for (const s of [step(), step({ agentId: 'a1' }), step({ model: 'zai:glm-5.3' })]) {
+      const r = await drain(routedStep(s, eng.next, ROUTE, CFG, p.io, new Map()))
+      expect(r.result.answer).toContain('[provider-router]')
+      expect(r.result.answer).toContain('routing is off')
+      expect(r.result.stopReason).toBe('refusal')
+    }
+    expect(eng.seen.length).toBe(1)
+    expect(net.calls.length).toBe(1)
+    expect(p.calls.length).toBe(0)
+    expect(shadowStats().pending).toBe(0)
+  })
+
+  test('shadowStep itself refuses while off, without calling next; a reload (resetShadow) clears it', async () => {
+    resetShadow()
+    const net = network()
+    const thrown = async (p: Promise<unknown>) => {
+      try {
+        await p
+      } catch (x) {
+        return x
+      }
+      return undefined
+    }
+    expect((await thrown(shadowStep(step(), blindEngine(net).next))) instanceof ShadowError).toBe(true)
+    let calls = 0
+    const counted = async function* () {
+      calls++
+    }
+    expect((await thrown(shadowStep(step(), counted))) instanceof ShadowError).toBe(true)
+    expect(calls).toBe(0)
+    resetShadow()
+    expect(shadowStats().blind).toBe(false)
+    expect((await shadowStep(step(), engine(net).next)).model).toBe(SHADOW_MODEL)
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('Esc during an unseen shadow does not turn routing off', async () => {
+    resetShadow()
+    const net = network()
+    const esc = new AbortController()
+    const next = async function* (): AsyncGenerator<any, any> {
+      esc.abort()
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+    }
+    await run(step(), { next }, new Map(), esc.signal)
+    expect(shadowStats().blind).toBe(false)
+    const eng = engine(net)
+    await run(step(), eng)
+    expect(eng.seen.length).toBe(1)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('a shadow the hook saw but refused (not captured) does not turn routing off', async () => {
+    resetShadow()
+    const net = network()
+    const bad = engine(net, { reqs: () => [{ messages: 7 }] })
+    expect((await run(step({ messageCount: 3 }), bad)).result.answer).toContain('not captured')
+    expect(shadowStats().blind).toBe(false)
+    const eng = engine(net)
+    await run(step(), eng)
+    expect(eng.seen.length).toBe(1)
+    expect(net.calls.length).toBe(0)
   })
 })
 

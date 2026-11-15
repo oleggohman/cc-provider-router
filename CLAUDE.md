@@ -38,7 +38,9 @@ are in `README.md`; the engine behaviour the design depends on is in
 - **The shadow capture fails closed.** Do not weaken the rules in
   `hooks/shadow.ts` (strict match, one pending capture per loop held until the
   stream ends, refuse every unmatched shadow-model request, `shadowLeaks` must
-  stay 0). Any change there needs a test asserting zero network calls. The
+  stay 0, the circuit breaker that refuses every later shadow step before
+  `next` once one ended uncaptured, without Esc, while the hook saw no engine
+  request). Any change there needs a test asserting zero network calls. The
   `http.fetch` hook carries a `.catch` (`shadowFetchFailed`) and the
   `turn.step` hook a try/catch plus `.catch`: a failing hook must never let a
   shadow request or a prefixed model reach the network or the engine.

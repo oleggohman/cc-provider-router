@@ -210,7 +210,7 @@ describe('routed step: anthropic and zai', () => {
     expect(s.calls.length).toBe(1)
     await tick()
     expect(s.calls[0]!.signal?.aborted).toBe(true)
-    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0 })
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false })
   })
 
   test('zai: Bearer key, Z.ai URL, subagent loop', async () => {

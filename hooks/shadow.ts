@@ -16,6 +16,9 @@
 //   the shadow model).
 // - If the `http.fetch` hook itself fails, its `.catch` (shadowFetchFailed)
 //   refuses anything that could be a shadow.
+// - Circuit breaker: a shadow step that ends uncaptured (no Esc) while the
+//   hook saw no engine request at all means engine requests bypass this mod;
+//   every later shadow step is then refused before `next`, until reload.
 // - The stub reports zero usage; its chunks are drained and never yielded.
 
 import { ZERO_USAGE } from './chunks.ts'
@@ -34,8 +37,18 @@ const pending = new Map<string, Pending>()
 // the engine-request markers changed.
 const counters = { shadowLeaks: 0, shadowRefused: 0 }
 
-export function shadowStats(): { shadowLeaks: number; shadowRefused: number; pending: number } {
-  return { ...counters, pending: pending.size }
+// Circuit breaker. `engineSeen` counts the engine requests the http.fetch
+// hook saw. A shadow step that ends uncaptured, without Esc, while the hook
+// saw no engine request at all, means the engine's requests bypass this mod
+// (where an organization's guard loads, only its own mods see them): the
+// shadow request went out unseen. `blind` then stays set until the module
+// reloads, and every later shadow step is refused before `next` is called.
+const breaker = { engineSeen: 0, blind: false }
+
+const BLIND = "routing is off: this plugin cannot see the engine's requests (an organization guard may hide them), so none is sent; restart Claude Code to retry"
+
+export function shadowStats(): { shadowLeaks: number; shadowRefused: number; pending: number; blind: boolean } {
+  return { ...counters, pending: pending.size, blind: breaker.blind }
 }
 
 // Test helper standing in for a module reload.
@@ -43,6 +56,8 @@ export function resetShadow(): void {
   pending.clear()
   counters.shadowLeaks = 0
   counters.shadowRefused = 0
+  breaker.engineSeen = 0
+  breaker.blind = false
 }
 
 export class ShadowError extends Error {}
@@ -145,6 +160,7 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
     }
     return next(e)
   }
+  breaker.engineSeen++
   const key = loopKey(e.init?.headers)
   const p = pending.get(key)
   if (p) {
@@ -166,6 +182,7 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
 // a shadow is refused: any request while a shadow is pending, or one naming
 // the shadow model anywhere in its URL or text body.
 export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & { readonly called: boolean }): R | { value: ShadowResponse } {
+  if (isEngineRequest(e)) breaker.engineSeen++
   if (next.called) return next(e)
   const body = e.init?.body
   if (pending.size > 0 || e.url.includes(SHADOW_MODEL) || (typeof body === 'string' && body.includes(SHADOW_MODEL))) return { value: refuse() }
@@ -175,9 +192,13 @@ export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) =
 export type ShadowStepEvent = { agentId?: string; messageCount: number; model: string }
 
 // Runs the shadow step for `e` and returns the engine's captured request.
-// Throws ShadowError when no request was captured or the loop already has a
-// pending shadow. The stub's chunks are drained here and never yielded.
-export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>): Promise<any> {
+// Throws ShadowError when no request was captured, the loop already has a
+// pending shadow, or the breaker is set (then `next` is never called). An
+// uncaptured step that ends without Esc (`signal`) while the hook saw no
+// engine request sets the breaker. The stub's chunks are drained here and
+// never yielded.
+export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>, signal?: AbortSignal): Promise<any> {
+  if (breaker.blind) throw new ShadowError(BLIND)
   const key = loopKeyOf(e.agentId)
   if (pending.has(key)) {
     counters.shadowRefused++
@@ -185,6 +206,7 @@ export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) =
   }
   const p: Pending = { messageCount: e.messageCount, body: undefined }
   pending.set(key, p)
+  const seenBefore = breaker.engineSeen
   let failure: unknown
   try {
     for await (const _ of next({ ...e, model: SHADOW_MODEL })) void _
@@ -195,7 +217,9 @@ export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) =
     pending.delete(key)
   }
   if (p.body === undefined) {
-    throw new ShadowError(`the engine request was not captured${failure ? `: ${String(failure)}` : ''}`)
+    const blind = breaker.engineSeen === seenBefore && !signal?.aborted
+    if (blind) breaker.blind = true
+    throw new ShadowError(`the engine request was not captured${failure ? `: ${String(failure)}` : ''}${blind ? `; ${BLIND}` : ''}`)
   }
   return p.body
 }

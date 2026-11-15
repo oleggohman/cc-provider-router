@@ -288,6 +288,15 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
   provider still finishes the request and bills it. Provider timeout: 600 s.
   Esc while a reply is being handed to Claude Code drops the router's copy of
   the conversation; the next step rebuilds it from the session history.
+- **An organization-managed guard can switch routing off.** The router sees
+  the request Claude Code builds through its own `http.fetch` hook. Where an
+  organization's guard loads, Claude Code shows engine requests to the
+  guard's own plugins only. Then the first routed step's stand-in request
+  (full conversation, for the non-existent model `provider-router-shadow`)
+  goes to Anthropic's API under your session (refused there, not billed), the
+  step answers `routing is off ...`, and every later routed step answers the
+  same without sending anything, until Claude Code restarts. `/providers`
+  shows `routing is off` then.
 - **Your subscription is never routed** and never pays for a routed call. The
   router does not use your Claude sign-in.
 - **History in memory.** Claude Code sends a conversation as a thread (after
@@ -347,12 +356,15 @@ models use it.
 | `error 429`, or `credit balance is too low` | rate limit, or no credit on the provider account |
 | `unknown custom endpoint "x"` | the name in `custom:<name>:` must match a `customEndpoints` entry |
 | `the conversation so far is not known to the router` | the plugin reloaded mid-conversation (or the history could not be rebuilt): run `/clear` or `/compact` |
+| `routing is off: this plugin cannot see the engine's requests ...` | an organization-managed guard hides Claude Code's requests from this plugin (see Limits); routing cannot work in that setup. Restart Claude Code to retry |
 | `malformed model id "..."` | a router prefix with nothing after it (`openai:`, `custom:gw`): use `<prefix>:<model>` or `custom:<name>:<model>` |
 | context-length error in a subagent | the task was too large for the model: lower `autoCompactWindow` or split the task |
 | anything else | `/providers` (status, warnings, counters), `/providers models` (calls each provider), `claude --debug` |
 
 `/providers` also shows two safety counters, `shadowLeaks` and
 `shadowRefused`. `shadowLeaks` must be 0; if it is not, please open an issue.
+It adds a `routing is off` line when the router has switched itself off
+because it cannot see Claude Code's requests (see Limits).
 
 ## Security
 

@@ -260,7 +260,7 @@ export async function* routedStep<E extends StepEvent>(
   }
   let body: any
   try {
-    body = await shadowStep(e, next)
+    body = await shadowStep(e, next, io.signal)
   } catch (err) {
     // Esc during the shadow step ends the step as cleanly as Esc during the
     // provider call.
