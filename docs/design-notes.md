@@ -69,7 +69,8 @@ models.
 - while a shadow is pending, every other engine request for that loop is
   answered locally (a non-retryable 400), and so is any shadow-model request
   matching no entry (for example after a module reload empties the map);
-- `shadowLeaks` (shadow-model requests passed on) must stay 0;
+- `shadowLeaks` (shadow-model requests that got past every engine-request
+  rule to the last guard, and were refused there) must stay 0;
   `shadowRefused` counts stray requests refused locally. `/providers` shows
   both.
 
@@ -145,14 +146,4 @@ live).
 
 ## Test-kit notes
 
-- An op hook answers `{ value: ... }` (`http.fetch`, `tool.list`,
-  `clock.sleep`, `session.messages`).
-- Stub `clock.sleep` (`() => ({ value: undefined })`), otherwise sleeps wait
-  for the mocked clock.
-- Read a `$.turn.step(...)` stream with `.next()` until `done`;
-  `stream.result` is `undefined` in the kit.
-- A test's own hooks cannot call `$.http.fetch`, and the kit loads the mod in
-  its own module instance. Routed success paths are tested through
-  `routedStep` with injected `fetch` / `sleep` / `signal`; plugin-level tests
-  cover key loading, the shadow model and zero network.
-- The kit's `$` has no `env` noun: `loadConfig` tests pass a fake `$`.
+See "Test-kit quirks" in `CLAUDE.md`.
