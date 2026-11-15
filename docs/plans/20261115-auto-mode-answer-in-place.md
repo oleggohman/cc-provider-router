@@ -338,12 +338,13 @@ Why: the host ends any `$.http.fetch` at 30 s (Task 2), in `v0.1.2` too; a `curl
 
 **Files:**
 - Modify: `hooks/register.ts`, `hooks/context.ts`, `hooks/context.test.ts`, `hooks/providers-command.ts`, `hooks/providers-command.test.ts`
+- ➕ As built: `routedStep` takes the loop's usage record as an optional 7th argument and records the reply's real usage there after a delivered step; the returned result keeps the engine's zeros (so `/cost` and the engine's own compaction see no invented usage). `context.ts` is unchanged. `shadow.ts` counts `classifierPassed` / `classifierRefused` where rule 3 decides (no decision changed); `/providers` shows `autoModeClassifier: on|off` and `classifier requests: passed N, refused M`. Also updated: `hooks/shadow.test.ts`, `hooks/providers/anthropic.test.ts`, `hooks/providers/openai.test.ts` (result usage and `shadowStats` shape)
 
-- [ ] write tests: a recorded step's real usage (from the job, not the engine's zeroed result) reaches `recordUsage`; an error step keeps the previous record; a dropped step records none
-- [ ] write a test that the mod's own compaction scheduling is unchanged (Task 2: kept; with zero usage in the SSE the engine never starts its own)
-- [ ] write a test that `/providers` shows `autoModeClassifier`, a count of classifier requests passed and refused, and the existing counters
-- [ ] implement the usage hand-off, the compaction change and the `/providers` lines
-- [ ] run tests, typecheck, validate - must pass before Task 11
+- [x] write tests: a recorded step's real usage (from the job, not the engine's zeroed result) reaches `recordUsage`; an error step keeps the previous record; a dropped step records none
+- [x] write a test that the mod's own compaction scheduling is unchanged (Task 2: kept; with zero usage in the SSE the engine never starts its own)
+- [x] write a test that `/providers` shows `autoModeClassifier`, a count of classifier requests passed and refused, and the existing counters
+- [x] implement the usage hand-off, the compaction change and the `/providers` lines
+- [x] run tests, typecheck, validate - must pass before Task 11
 
 ### Task 11: Local auto-mode check and smoke test update
 

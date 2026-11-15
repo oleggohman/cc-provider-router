@@ -206,12 +206,13 @@ describe('routed step: anthropic and zai', () => {
     expect(chunks.map(c => c.kind)).toEqual(['text', 'tool', 'input', 'stop'])
     expect(result.toolUses).toEqual([{ name: 'Bash', input: { command: 'ls' } }])
     expect(result.stopReason).toBe('tool_use')
-    expect(result.usage.input_tokens).toBe(20)
+    // The step returns the engine's zero usage; the provider's usage goes to the loop's record (register.ts).
+    expect(result.usage.input_tokens).toBe(0)
     // The timer was started and stopped once the reply won.
     expect(s.calls.length).toBe(1)
     await tick()
     expect(s.calls[0]!.signal?.aborted).toBe(true)
-    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false })
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false, classifierPassed: 0, classifierRefused: 0 })
   })
 
   test('zai: Bearer key, Z.ai URL, subagent loop', async () => {

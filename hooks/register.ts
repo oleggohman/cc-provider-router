@@ -176,9 +176,7 @@ export const register: Register = (on, options) => {
         history: () => readHistory($, e.agentId),
         agents: () => readAgents($),
       }
-      const result = yield* routedStep(e, next, model.route, cfg, io, state.threads)
-      recordUsage(state.usage, key, e.model, result?.usage)
-      return result
+      return yield* routedStep(e, next, model.route, cfg, io, state.threads, state.usage)
     } catch (err) {
       dropBase(state.threads, key)
       return yield* errorChunks(e, localError(prefixOf(e.model), `internal error: ${String(err)}`, secrets))
@@ -310,6 +308,11 @@ function delivered(result: any, reply: Reply): boolean {
 // abandoned without one (the hook's budget), by the signal's abort listener;
 // a late continuation touches the loop's state only while its job is the
 // loop's newest.
+//
+// Usage (context.ts). The SSE answer reports zero usage, so the engine's
+// result carries zeros. The provider's real usage is recorded for the loop
+// from the job, only for a delivered reply: an error step keeps the previous
+// record, a dropped or cancelled step records nothing.
 export async function* routedStep<E extends StepEvent>(
   e: E,
   next: (e: E) => AsyncIterable<unknown>,
@@ -317,6 +320,7 @@ export async function* routedStep<E extends StepEvent>(
   cfg: Config,
   io: StepIO,
   threads: Threads,
+  usage?: UsageMap,
 ): AsyncGenerator<any, any, unknown> {
   const secrets = secretsOf(cfg)
   const name = routeLabel(route)
@@ -432,8 +436,7 @@ export async function* routedStep<E extends StepEvent>(
     const sent = current.sent
     const length = (Array.isArray(sent?.messages) ? sent.messages.length : 0) + 1
     recordStep(threads, key, sent, outcome.reply.content, { ...current.anchors, [outcome.messageId]: length })
+    if (usage) recordUsage(usage, key, e.model, outcome.reply.usage)
   }
-  // The provider's real usage, as before answer in place: the engine's result
-  // carries the SSE's zeros.
-  return { ...result, usage: { ...outcome.reply.usage, model: e.model } }
+  return result
 }

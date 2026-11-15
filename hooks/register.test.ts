@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
+import { compactThreshold, maybeCompact, type UsageMap } from './context.ts'
 import { fetchSide, markStep, onSubagentTurnEnd, onUnprefixedStep, routedStep } from './register.ts'
 import { classifyModel } from './route.ts'
 import { SHADOW_MODEL, endShadow, latestJob, resetShadow, sessionFlags, shadowFetch, shadowStats } from './shadow.ts'
@@ -197,6 +198,13 @@ test('fetchSide: $.http.fetch when curl cannot be started', async () => {
   expect(f.fetched).toEqual(['https://api.openai.com/v1/chat/completions'])
 })
 
+test('/providers shows the autoModeClassifier option and the classifier counters', { options: { autoModeClassifier: false } }, async ($, on) => {
+  on('env.get', () => ({ value: undefined }) as any)
+  const r: any = await ($ as any).command.run({ command: 'providers', args: '' })
+  expect(r.text).toContain('autoModeClassifier: off')
+  expect(r.text).toMatch(/classifier requests: passed \d+, refused \d+/)
+})
+
 test('/providers names the transport; in the test kit (no process noun) it is fetch with its 30 s limit', async ($, on) => {
   on('env.get', () => ({ value: undefined }) as any)
   const r: any = await ($ as any).command.run({ command: 'providers', args: '' })
@@ -209,6 +217,7 @@ test('/providers names the transport; in the test kit (no process noun) it is fe
 // chunks flow up; after the stream the step decides delivery.
 
 const ZAI = { provider: 'zai', model: 'glm-5.3' } as const
+const ZAI_ID = 'zai:glm-5.3'
 const zcfg = () => cfg({ zai: 'k-zai-test-1' })
 const reply = (content: any[], stop = 'end_turn') => ({ status: 200, text: JSON.stringify({ model: 'glm-5.3', content, stop_reason: stop, usage: { input_tokens: 42, output_tokens: 3 } }) })
 const TEXT = reply([{ type: 'text', text: '  Hello there \n' }])
@@ -272,14 +281,11 @@ describe('routedStep: the engine answers in place', () => {
     expect(eng.answers[0].text).toContain('"input_tokens":0')
     expect(chunks).toEqual(t.yielded)
     expect(chunks.map(c => c.kind)).toEqual(['engine', 'text', 'tool', 'input', 'stop', 'engine'])
-    const { usage, ...rest2 } = rest.result
-    const { usage: engineUsage, ...engineRest } = t.returned
-    expect(rest2).toEqual(engineRest)
-    expect(engineUsage.input_tokens).toBe(0)
-    // The provider's real usage, as v0.1.2 reported it (decision: until Task 10).
-    expect(usage.input_tokens).toBe(42)
-    expect(usage.model).toBe('zai:glm-5.3')
-    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false })
+    // The step returns the engine's result as it is: its zeros, not the
+    // provider's usage (that goes to the usage record, see below).
+    expect(rest.result).toEqual(t.returned)
+    expect(rest.result.usage.input_tokens).toBe(0)
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false, classifierPassed: 0, classifierRefused: 0 })
   })
 
   test("an error outcome: none of the stub's chunks, then the error chunks and their result", async () => {
@@ -361,6 +367,64 @@ describe('routedStep: the engine answers in place', () => {
     const call = spawned.find(s => !s.argv.includes('--version'))
     expect(call.argv).toEqual(['curl', '--disable', '--config', '-'])
     expect(eng.network.length).toBe(0)
+  })
+})
+
+describe('routedStep: usage comes from the job, not the engine result', () => {
+  // The engine's result carries the SSE's zeros; the provider's real usage
+  // goes to the loop's usage record only after a delivered step.
+  const usageAt = (inputTokens: number) => ({ status: 200, text: JSON.stringify({ model: 'glm-5.3', content: [{ type: 'text', text: 'Hi' }], stop_reason: 'end_turn', usage: { input_tokens: inputTokens, output_tokens: 3 } }) })
+  const record = (map: UsageMap) => map.get('main')
+
+  test('a delivered reply records the provider\'s real usage for its loop', async () => {
+    resetShadow()
+    const usage: UsageMap = new Map()
+    const { result } = await drain(routedStep(zstep(), engine().next, ZAI, zcfg(), io(provider([TEXT]).fetch), new Map(), usage))
+    expect(record(usage)).toEqual({ model: 'zai:glm-5.3', inputTokens: 42 })
+    expect(result.usage.input_tokens).toBe(0)
+  })
+
+  test('an error step records nothing and keeps the previous record', async () => {
+    resetShadow()
+    const usage: UsageMap = new Map([['main', { model: 'zai:glm-5.3', inputTokens: 390000 }]])
+    await drain(routedStep(zstep(), engine().next, ZAI, zcfg(), io(provider([{ status: 503, text: '{}' }]).fetch), new Map(), usage))
+    expect(record(usage)).toEqual({ model: 'zai:glm-5.3', inputTokens: 390000 })
+  })
+
+  test('a step whose delivery does not match records nothing', async () => {
+    resetShadow()
+    const usage: UsageMap = new Map()
+    const eng = engine()
+    const next = async function* (e: any): AsyncGenerator<any, any> {
+      return { ...(yield* eng.next(e)), stopReason: null }
+    }
+    await drain(routedStep(zstep(), next, ZAI, zcfg(), io(provider([TEXT]).fetch), new Map(), usage))
+    expect(usage.size).toBe(0)
+  })
+
+  test('Esc before delivery records nothing', async () => {
+    resetShadow()
+    const usage: UsageMap = new Map()
+    const h = held()
+    const esc = new AbortController()
+    const pending = drain(routedStep(zstep(), engine().next, ZAI, zcfg(), io(h.fetch, esc.signal), new Map(), usage))
+    await until(() => h.calls.length > 0)
+    esc.abort()
+    await pending
+    expect(usage.size).toBe(0)
+    h.settle(TEXT)
+    await tick()
+  })
+
+  test("the mod's own compaction is scheduled from the recorded usage, the engine's result stays at zero", async () => {
+    resetShadow()
+    const at = compactThreshold(ZAI_ID, new Map())!
+    const usage: UsageMap = new Map()
+    const { result } = await drain(routedStep(zstep(), engine().next, ZAI, zcfg(), io(provider([usageAt(at)]).fetch), new Map(), usage))
+    expect(result.usage.input_tokens).toBe(0)
+    const queued: Array<() => void> = []
+    expect(maybeCompact(usage, new Map(), { after: (_ms, fn) => void queued.push(fn), compact: async () => ({}) })).toBe(true)
+    expect(queued.length).toBe(1)
   })
 })
 

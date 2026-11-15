@@ -44,6 +44,19 @@ describe('statusText', () => {
     expect(statusText(cfg({}), STATS)).not.toContain('routing is off')
   })
 
+  test('autoModeClassifier: on or off from the config, with the opt-out\'s effect', () => {
+    expect(statusText(cfg({}), STATS)).toContain('autoModeClassifier: on')
+    const off = statusText(cfg({}, { autoModeClassifier: false }), STATS)
+    expect(off).toContain('autoModeClassifier: off')
+    expect(off).not.toContain('autoModeClassifier: on')
+  })
+
+  test('classifier requests passed and refused, from the counters', () => {
+    const t = statusText(cfg({}), { ...STATS, classifierPassed: 3, classifierRefused: 1 })
+    expect(t).toContain('classifier requests: passed 3, refused 1')
+    expect(statusText(cfg({}), STATS)).toContain('classifier requests: passed 0, refused 0')
+  })
+
   test('the transport line: curl, or fetch with its 30 s limit; absent when unknown', () => {
     expect(statusText(cfg({}), STATS, 'curl')).toContain('transport: curl')
     expect(statusText(cfg({}), STATS, 'curl')).not.toContain('30 s limit')

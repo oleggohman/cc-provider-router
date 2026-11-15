@@ -126,7 +126,7 @@ describe('routed step with the shadow capture', () => {
     expect(JSON.stringify(chunks)).not.toContain('ENGINE-STUB-CHUNK')
     expect(result.answer).not.toContain('ENGINE-STUB-CHUNK')
     expect(result.answer).not.toContain('sk-test-secret')
-    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false })
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false, classifierPassed: 0, classifierRefused: 0 })
   })
 
   test('agent header missing: refused locally (400, no retry), step ends with an error', async () => {
@@ -1307,6 +1307,59 @@ describe('classifier exception: the shadow model under the classifier shape stay
     })
     expect(refused(await fetchVia(net, classifier({ ...STAGE1, model: SHADOW_MODEL })))).toBe(true)
     expect(net.calls.length).toBe(0)
+  })
+})
+
+describe('classifier counters: passed and refused by the predicate, for /providers', () => {
+  test('a classifier request passed under autoModeClassifier: counted as passed, forwarded once', async () => {
+    resetShadow()
+    const net = network()
+    expect(passed(await fetchVia(net, classifier(STAGE1), ON))).toBe(true)
+    expect(shadowStats()).toMatchObject({ classifierPassed: 1, classifierRefused: 0, shadowRefused: 0 })
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('a classifier request refused under the opt-out after a routed step: counted as refused, zero network', async () => {
+    resetShadow()
+    noteStep(true)
+    const net = network()
+    expect(refused(await fetchVia(net, classifier(STAGE1), OFF))).toBe(true)
+    expect(shadowStats()).toMatchObject({ classifierPassed: 0, classifierRefused: 1 })
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('a classifier request refused under the opt-out before any step: counted as refused', async () => {
+    resetShadow()
+    const net = network()
+    expect(refused(await fetchVia(net, classifier(STAGE1), OFF))).toBe(true)
+    expect(shadowStats()).toMatchObject({ classifierRefused: 1 })
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('under the opt-out with only unprefixed steps seen the predicate decides nothing: the request is ordinary traffic, not counted', async () => {
+    resetShadow()
+    noteStep(false)
+    const net = network()
+    expect(passed(await fetchVia(net, classifier(STAGE1), OFF))).toBe(true)
+    expect(shadowStats()).toMatchObject({ classifierPassed: 0, classifierRefused: 0 })
+  })
+
+  test('requests the predicate does not match are not counted as classifier requests', async () => {
+    resetShadow()
+    const net = network()
+    // An ordinary engine request of an unprefixed model, and a refused prefixed one.
+    expect(passed(await fetchVia(net, engineReq(CONVERSATION_NO_THREAD), ON))).toBe(true)
+    expect(refused(await fetchVia(net, classifier({ ...STAGE1, model: 'custom:gw:m' }), ON))).toBe(true)
+    expect(shadowStats()).toMatchObject({ classifierPassed: 0, classifierRefused: 0 })
+  })
+
+  test('resetShadow (a module reload) clears both counters', async () => {
+    resetShadow()
+    const net = network()
+    await fetchVia(net, classifier(STAGE1), ON)
+    expect(shadowStats().classifierPassed).toBe(1)
+    resetShadow()
+    expect(shadowStats()).toMatchObject({ classifierPassed: 0, classifierRefused: 0 })
   })
 })
 

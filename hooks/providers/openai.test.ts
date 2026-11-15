@@ -228,7 +228,7 @@ describe('routed step: openai and custom', () => {
     expect(chunks[2]).toEqual({ kind: 'input', index: 1, json: '{"command":"ls"}' })
     expect(result.toolUses).toEqual([{ name: 'Bash', input: { command: 'ls' } }])
     expect(result.stopReason).toBe('tool_use')
-    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false })
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false, classifierPassed: 0, classifierRefused: 0 })
   })
 
   test('custom with key, subagent loop: endpoint URL and key used', async () => {

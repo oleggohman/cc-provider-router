@@ -158,7 +158,7 @@ describe('compaction from turn.complete', () => {
     expect(maybeCompact(t, windows, deps as any)).toBe(false)
   })
 
-  test('compact is never called during turn.step; usage is recorded from the routed result', async () => {
+  test('compact is never called during turn.step; the usage record comes from the job, the engine result keeps zeros', async () => {
     resetShadow()
     const t = fresh()
     const c = compactor()
@@ -167,8 +167,8 @@ describe('compaction from turn.complete', () => {
     const p = provider([{ status: 200, text: reply }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
     const e = step('openai:gpt-5')
-    const { result } = await drain(routedStep(e, eng.next, { provider: 'openai', model: 'gpt-5' }, cfg({ openai: 'k-openai-1' }), io, new Map()))
-    recordUsage(t, 'main', e.model, result.usage)
+    const { result } = await drain(routedStep(e, eng.next, { provider: 'openai', model: 'gpt-5' }, cfg({ openai: 'k-openai-1' }), io, new Map(), t))
+    expect(result.usage.input_tokens).toBe(0)
     expect(result.answer).toBe('done')
     expect(c.compacts).toBe(0)
     expect(c.queued.length).toBe(0)

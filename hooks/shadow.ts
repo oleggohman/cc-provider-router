@@ -80,7 +80,9 @@ let jobSeq = 0
 // shadowLeaks: shadow-model requests that got past every engine-request rule
 // to the last guard (refused there too). Must stay 0: a non-zero value means
 // the engine-request markers changed.
-const counters = { shadowLeaks: 0, shadowRefused: 0 }
+// classifierPassed / classifierRefused: requests the classifier predicate
+// decided (rule 3), for /providers. Counted where the decision is taken only.
+const counters = { shadowLeaks: 0, shadowRefused: 0, classifierPassed: 0, classifierRefused: 0 }
 
 // Circuit breaker. `engineSeen` counts the engine requests the http.fetch
 // hook saw, by the host-set `next.origin.plugin === 'engine'` alone: another
@@ -107,7 +109,7 @@ export type ShadowOptions = { readonly autoModeClassifier: boolean }
 
 const BLIND = "routing is off: this plugin saw no engine request for a routed step (an organization guard may hide Claude Code's requests), so none is sent; it resumes once the plugin sees a Claude Code request, or restart Claude Code"
 
-export function shadowStats(): { shadowLeaks: number; shadowRefused: number; pending: number; blind: boolean } {
+export function shadowStats(): { shadowLeaks: number; shadowRefused: number; classifierPassed: number; classifierRefused: number; pending: number; blind: boolean } {
   return { ...counters, pending: pending.size, blind: breaker.blind }
 }
 
@@ -117,6 +119,8 @@ export function resetShadow(): void {
   latest.clear()
   counters.shadowLeaks = 0
   counters.shadowRefused = 0
+  counters.classifierPassed = 0
+  counters.classifierRefused = 0
   breaker.engineSeen = 0
   breaker.blind = false
   session.routedSeen = false
@@ -347,8 +351,14 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) =
   if (pending.size > 0 && unreadable(e, body)) return { value: refuse() }
   // 3. The auto-mode classifier.
   if (isClassifierRequest(e, next)) {
-    if (opts?.autoModeClassifier === true) return next(e)
-    if (session.routedSeen || !session.stepSeen) return { value: refuse() }
+    if (opts?.autoModeClassifier === true) {
+      counters.classifierPassed++
+      return next(e)
+    }
+    if (session.routedSeen || !session.stepSeen) {
+      counters.classifierRefused++
+      return { value: refuse() }
+    }
   }
   // 4. Any other engine request of a loop with a pending shadow (a 2nd or 3rd
   // request, a side request, a retry): refused, never passed.
