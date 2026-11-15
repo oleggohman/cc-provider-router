@@ -202,6 +202,32 @@ could do is answer `allow`, which would run a routed model's calls with no
 review at all while the session still says auto mode; the mod does not. The
 limit is documented in the README instead.
 
+### Answer in place (probed on throwaway copies, Claude Code 2.1.325, 2026-11-15)
+
+Probes with a local mock provider (`custom:mock:m` at `http://127.0.0.1`),
+`claude -p --permission-mode auto`, the main loop's model reply always an
+`Agent` call. None of this is in the mod yet; the plan is
+`docs/plans/20261115-auto-mode-answer-in-place.md`, whose spike task repeats
+each row with a kept script before any code depends on it.
+
+| Probe | Result |
+|---|---|
+| captured shadow request body, auto mode | keys `context_management, diagnostics, max_tokens, messages, metadata, model, output_config, safeguards, stream, system, thinking, thread, tools`; `safeguards` is `[{ type: "dangerous_tool_use", classifier_context: { v: 1, permission_mode: "auto", ... } }]`: the request does ask for a verdict |
+| chunks the hook reads from the shadow's `next(...)` stream (today's empty stub) | `engine` refs 1–4, `stop` (ref 5, `end_turn`, zero usage, model `provider-router-shadow`), `engine` ref 6 |
+| yield the first and last of those `engine` chunks around the hook-made reply, the hook-made `stop` under the stub's ref | no change: refused, no `[server-classifier]` log line |
+| answer the shadow request itself with an SSE body holding the `Agent` `tool_use` block, and pass the engine's stream up (`yield* next(...)`) | the engine logs `[server-classifier] a completed response carried no classification result (no safeguard_results); assuming something on the path to the API dropped it, so auto mode classifies locally for the rest of this session`, then `Agent: no server verdict for this call (server_no_result); the local classifier decides it` |
+| that run, today's rule refusing every other engine request of the pending loop | the classifier request (`model=claude-sonnet-5 stage=xml_s1`) ends `outcome=error` in 2 ms; the engine retries it with `model=custom:mock:m`, which fails too; the call is refused: `custom:mock:m is temporarily unavailable, so auto mode cannot determine the safety of Agent right now` |
+| the same with engine requests of the pending loop that name a non-shadow model and carry no `tools` let through | classifier requests end `outcome=ok` (about 1.8 s each); `Agent` runs, the subagent starts, 0 permission denials |
+| the classifier request as a mock gateway sees it (`ANTHROPIC_BASE_URL` run, no mod) | model `claude-sonnet-5`, body keys `max_tokens, messages, metadata, model, stop_sequences, system, thinking` (later ones without `stop_sequences`), no `tools`, no `thread`, system text after the billing header starting `You are a secur` |
+| `$.clock.sleep(25000)` alone inside the `http.fetch` hook before answering | the hook is cut at 10 s (`http.fetch settled in 10002.7ms`), its `.catch` refuses the request |
+| a nested `$.http.fetch` taking 25 s inside the `http.fetch` hook before answering | completes (`$.http.fetch (provider-router): 200 in 25002ms`, `http.fetch settled in 25003.7ms`), the engine accepts the answer; the log marks it `http.fetch nested in provider-router#1`: the nested fetch does not pass through the mod's own `http.fetch` hook |
+| usage of that run | `modelUsage` lists only `provider-router-shadow` |
+
+Not probed: Esc, error replies, usage and model names in `/cost` and the
+transcript, thread anchors, engine compaction, an interactive session, holds
+longer than 25 s, the order of the classifier request against the end of the
+step's stream.
+
 ## Test-kit notes
 
 See "Test-kit quirks" in `CLAUDE.md`.
