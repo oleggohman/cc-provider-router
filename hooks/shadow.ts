@@ -24,15 +24,31 @@
 //   one with engine markers (any plugin can set those).
 // - The stub reports zero usage; its chunks are drained and never yielded.
 
-import { ZERO_USAGE } from './chunks.ts'
+import { stubSse } from './sse.ts'
 
 export const SHADOW_MODEL = 'provider-router-shadow'
 
-type Pending = { messageCount: number; body: any | undefined }
+// Where a job is in its loop's shadow step. Only `registered` and `captured`
+// are reached so far; the others are set by the answer-in-place steps.
+export type JobPhase =
+  | 'registered' // registered, no engine request matched yet
+  | 'captured' // the shadow request matched; its body is on the job
+  | 'answered' // provider replied (or failed); outcome staged
+  | 'handed' // the SSE answer was returned to the engine
+  | 'abandoned' // timeout, Esc, hook budget, or dispatch abandonment
+
+// Answers a captured shadow request with the reply as SSE text. A rejection
+// (or a throw) makes the request a local refusal, never a pass to the network.
+export type ShadowHandler = (body: any) => Promise<string>
+
+// One shadow step of one loop. `id` is unique per job: every async
+// continuation checks it before it acts on the loop's entry.
+export type Job = { id: number; messageCount: number; phase: JobPhase; body?: any; handler?: ShadowHandler }
 
 // Module-level: a module reload (e.g. a /config change) starts empty, and a
 // stray shadow request is then refused by the no-entry rule.
-const pending = new Map<string, Pending>()
+const pending = new Map<string, Job>()
+let jobSeq = 0
 
 // shadowRefused: requests answered locally with the 400.
 // shadowLeaks: shadow-model requests that got past every engine-request rule
@@ -113,19 +129,8 @@ function noteOrigin(next: Origin): void {
   breaker.blind = false
 }
 
-function stubSse(): string {
-  const events: [string, unknown][] = [
-    ['message_start', { type: 'message_start', message: { id: 'msg_shadow', type: 'message', role: 'assistant', model: SHADOW_MODEL, content: [], stop_reason: null, stop_sequence: null, usage: ZERO_USAGE } }],
-    ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
-    ['content_block_stop', { type: 'content_block_stop', index: 0 }],
-    ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 0 } }],
-    ['message_stop', { type: 'message_stop' }],
-  ]
-  return events.map(([ev, d]) => `event: ${ev}\ndata: ${JSON.stringify(d)}\n\n`).join('')
-}
-
-function stub(): ShadowResponse {
-  return { status: 200, ok: true, headers: { 'content-type': 'text/event-stream' }, text: stubSse() }
+function stub(text: string = stubSse()): ShadowResponse {
+  return { status: 200, ok: true, headers: { 'content-type': 'text/event-stream' }, text }
 }
 
 // A local, non-retryable 400: the engine neither retries nor falls back.
@@ -170,6 +175,17 @@ function countMatches(messages: unknown, expected: number): boolean {
   return Array.isArray(messages) && messages.length >= 1 && messages.length <= Math.max(1, expected)
 }
 
+// The local answer to a captured shadow request: the handler's SSE, or the
+// empty stub when the job has no handler. A failing handler is refused.
+async function answer(job: Job, body: any): Promise<ShadowResponse> {
+  if (!job.handler) return stub()
+  try {
+    return stub(await job.handler(body))
+  } catch {
+    return refuse()
+  }
+}
+
 // `http.fetch` hook. Returns the local answer, or calls `next` only for
 // requests that are clearly not shadows.
 export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin): Promise<R | { value: ShadowResponse }> {
@@ -188,9 +204,10 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) =
   const key = loopKey(e.init?.headers)
   const p = pending.get(key)
   if (p) {
-    if (body && body.model === SHADOW_MODEL && p.body === undefined && countMatches(body.messages, p.messageCount)) {
+    if (body && body.model === SHADOW_MODEL && p.phase === 'registered' && countMatches(body.messages, p.messageCount)) {
       p.body = body
-      return { value: stub() }
+      p.phase = 'captured'
+      return { value: await answer(p, body) }
     }
     // Any other engine request of a loop with a pending shadow (a 2nd or 3rd
     // request, a side request, a retry): refused, never passed.
@@ -215,6 +232,25 @@ export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) =
 
 export type ShadowStepEvent = { agentId?: string; messageCount: number; model: string }
 
+// Registers the job of a loop's shadow step. One job per loop: a second begin
+// while one is pending is refused (ShadowError, counted) and the pending job
+// stays. The id is minted here, so it is unique across loops and reloads.
+export function beginShadow(key: string, spec: { messageCount: number; handler?: ShadowHandler }): Job {
+  if (pending.has(key)) {
+    counters.shadowRefused++
+    throw new ShadowError(`a shadow step is already pending for loop ${key}`)
+  }
+  const job: Job = { id: ++jobSeq, messageCount: spec.messageCount, phase: 'registered', handler: spec.handler }
+  pending.set(key, job)
+  return job
+}
+
+// Removes the loop's job when it is the job with this id. A stale id, or an
+// id of a job that already ended, does nothing.
+export function endShadow(key: string, id: number): void {
+  if (pending.get(key)?.id === id) pending.delete(key)
+}
+
 // Runs the shadow step for `e` and returns the engine's captured request.
 // Throws ShadowError when no request was captured, the loop already has a
 // pending shadow, or the breaker is set (then `next` is never called). An
@@ -225,12 +261,7 @@ export type ShadowStepEvent = { agentId?: string; messageCount: number; model: s
 export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>, signal?: AbortSignal): Promise<any> {
   if (breaker.blind) throw new ShadowError(BLIND)
   const key = loopKeyOf(e.agentId)
-  if (pending.has(key)) {
-    counters.shadowRefused++
-    throw new ShadowError(`a shadow step is already pending for loop ${key}`)
-  }
-  const p: Pending = { messageCount: e.messageCount, body: undefined }
-  pending.set(key, p)
+  const job = beginShadow(key, { messageCount: e.messageCount })
   const seenBefore = breaker.engineSeen
   let failure: unknown
   try {
@@ -239,12 +270,12 @@ export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) =
     failure = err
   } finally {
     // Only once the shadow's stream has ended (success, error or abort).
-    pending.delete(key)
+    endShadow(key, job.id)
   }
-  if (p.body === undefined) {
+  if (job.body === undefined) {
     const blind = breaker.engineSeen === seenBefore && !signal?.aborted
     if (blind) breaker.blind = true
     throw new ShadowError(`the engine request was not captured${failure ? `: ${String(failure)}` : ''}${blind ? `; ${BLIND}` : ''}`)
   }
-  return p.body
+  return job.body
 }

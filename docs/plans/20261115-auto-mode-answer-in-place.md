@@ -247,12 +247,12 @@ Each item is answered live and recorded as a row in `docs/design-notes.md` with 
 
 `shadowStep` stays, as a wrapper over the new job functions that registers a job with no handler (so the stub is answered and the body returned, exactly as today). `register.ts` is untouched and the suite stays green.
 
-- [ ] write tests for `beginShadow(key, job)` / `endShadow(key, id)`: one job per loop; a second begin for a pending loop is refused; `endShadow` with a stale id does nothing
-- [ ] write tests: a matching shadow request with a job that has a handler calls it once and returns its answer; the handler throwing or rejecting gives a local error answer, never `next`; zero network calls for the shadow request in each case
-- [ ] write tests that today's fail-closed cases hold unchanged through the wrapper: no job → refused; unparseable body while pending → refused; non-engine request naming the shadow model → refused and counted; `shadowFetchFailed` refuses while anything is pending
-- [ ] write tests for the circuit breaker with jobs: a job that ends in phase `registered`, without Esc, with no engine request seen sets `blind`; an engine request clears it
-- [ ] implement `Job`, `JobPhase`, `beginShadow`, `endShadow`, the handler call in `shadowFetch`, and `shadowStep` as the wrapper
-- [ ] run tests, typecheck, validate - must pass before Task 5
+- [x] write tests for `beginShadow(key, job)` / `endShadow(key, id)`: one job per loop; a second begin for a pending loop is refused; `endShadow` with a stale id does nothing
+- [x] write tests: a matching shadow request with a job that has a handler calls it once and returns its answer; the handler throwing or rejecting gives a local error answer, never `next`; zero network calls for the shadow request in each case
+- [x] write tests that today's fail-closed cases hold unchanged through the wrapper: no job → refused; unparseable body while pending → refused; non-engine request naming the shadow model → refused and counted; `shadowFetchFailed` refuses while anything is pending
+- [x] write tests for the circuit breaker with jobs: a job that ends in phase `registered`, without Esc, with no engine request seen sets `blind`; an engine request clears it
+- [x] implement `Job`, `JobPhase`, `beginShadow`, `endShadow`, the handler call in `shadowFetch`, and `shadowStep` as the wrapper
+- [x] run tests, typecheck, validate - must pass before Task 5
 
 ### Task 5: Unconditional refusals and the classifier exception
 

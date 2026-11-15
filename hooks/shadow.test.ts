@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
-import { SHADOW_MODEL, ShadowError, isEngineRequest, resetShadow, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
+import { SHADOW_MODEL, ShadowError, beginShadow, endShadow, isEngineRequest, resetShadow, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
 import { cfg, drain, sleeper, tick, ZERO } from '../tests/harness.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the engine
@@ -702,6 +702,141 @@ describe('shadowStep', () => {
     expect(rb.messages.length).toBe(2)
     expect(net.calls.length).toBe(0)
     expect(shadowStats().pending).toBe(0)
+  })
+})
+
+describe('jobs: beginShadow / endShadow', () => {
+  test('one job per loop: a second begin for a pending loop is refused, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    const first = beginShadow('a1', { messageCount: 1 })
+    let err: unknown
+    try {
+      beginShadow('a1', { messageCount: 1 })
+    } catch (x) {
+      err = x
+    }
+    expect(err instanceof ShadowError).toBe(true)
+    expect(shadowStats().pending).toBe(1)
+    expect(shadowStats().shadowRefused).toBe(1)
+    // The pending job still answers its own loop's match.
+    const out = await send(net, { agent: 'a1', messages: 1 })
+    expect(out.text).toContain('message_start')
+    expect(first.phase).toBe('captured')
+    expect(net.calls.length).toBe(0)
+    endShadow('a1', first.id)
+    expect(shadowStats().pending).toBe(0)
+  })
+
+  test('a different loop may begin while one is pending; each job gets a distinct id', () => {
+    resetShadow()
+    const main = beginShadow('main', { messageCount: 1 })
+    const sub = beginShadow('a1', { messageCount: 1 })
+    expect(main.id).not.toBe(sub.id)
+    expect(shadowStats().pending).toBe(2)
+    endShadow('main', main.id)
+    endShadow('a1', sub.id)
+    expect(shadowStats().pending).toBe(0)
+  })
+
+  test('endShadow with a stale id does nothing: the newer job on the loop stays', () => {
+    resetShadow()
+    const old = beginShadow('a1', { messageCount: 1 })
+    endShadow('a1', old.id)
+    const fresh = beginShadow('a1', { messageCount: 1 })
+    endShadow('a1', old.id)
+    expect(shadowStats().pending).toBe(1)
+    endShadow('a1', fresh.id)
+    expect(shadowStats().pending).toBe(0)
+  })
+
+  test('a job with no handler answers the stub, as shadowStep always did, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    const job = beginShadow('main', { messageCount: 1 })
+    const out = await send(net, { messages: 1 })
+    expect(out.status).toBe(200)
+    expect(out.text).toContain('message_start')
+    expect(out.text).toContain('"input_tokens":0')
+    expect(job.body.model).toBe(SHADOW_MODEL)
+    expect(net.calls.length).toBe(0)
+    endShadow('main', job.id)
+  })
+})
+
+describe('jobs: the handler answers the captured shadow request', () => {
+  test('a matching request calls the handler once and returns its answer, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    const seen: any[] = []
+    const job = beginShadow('main', { messageCount: 1, handler: async body => (seen.push(body), 'SSE-ANSWER') })
+    const out = await send(net, { messages: 1 })
+    expect(out.status).toBe(200)
+    expect(out.ok).toBe(true)
+    expect(out.text).toBe('SSE-ANSWER')
+    expect(seen.length).toBe(1)
+    expect(seen[0].model).toBe(SHADOW_MODEL)
+    expect(job.phase).toBe('captured')
+    // A second request of the same loop is refused and the handler is not called again.
+    const again = await send(net, { messages: 1 })
+    expect(again.status).toBe(400)
+    expect(seen.length).toBe(1)
+    expect(net.calls.length).toBe(0)
+    endShadow('main', job.id)
+  })
+
+  test('a handler that rejects gives a local refusal, never next, and is called once', async () => {
+    resetShadow()
+    const net = network()
+    let calls = 0
+    const job = beginShadow('main', {
+      messageCount: 1,
+      handler: async () => {
+        calls++
+        throw new Error('handler failed')
+      },
+    })
+    const out = await send(net, { messages: 1 })
+    expect(out.status).toBe(400)
+    expect(out.headers['x-should-retry']).toBe('false')
+    expect(calls).toBe(1)
+    expect(net.calls.length).toBe(0)
+    expect(shadowStats().shadowRefused).toBe(1)
+    endShadow('main', job.id)
+  })
+
+  test('a handler that throws synchronously gives the same local refusal', async () => {
+    resetShadow()
+    const net = network()
+    const job = beginShadow('main', {
+      messageCount: 1,
+      handler: (() => {
+        throw new Error('sync failure')
+      }) as any,
+    })
+    const out = await send(net, { messages: 1 })
+    expect(out.status).toBe(400)
+    expect(net.calls.length).toBe(0)
+    endShadow('main', job.id)
+  })
+
+  test('the handler is not called for an inconsistent request: refused, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    let calls = 0
+    const job = beginShadow('main', {
+      messageCount: 1,
+      handler: async () => {
+        calls++
+        return 'SSE'
+      },
+    })
+    const out = await send(net, { messages: 3 })
+    expect(out.status).toBe(400)
+    expect(calls).toBe(0)
+    expect(job.phase).toBe('registered')
+    expect(net.calls.length).toBe(0)
+    endShadow('main', job.id)
   })
 })
 
