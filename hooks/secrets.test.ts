@@ -21,6 +21,7 @@ const KEYS = {
   openai: 'OAKEYvalue0123abcd',
   anthropic: 'ANKEYvalue4567efgh',
   zai: 'ZAKEYvalue89abijkl',
+  xai: 'XAIKEYvalue2345ijkl',
   gw: 'GWKEYvaluecdefmnop',
 }
 const ALL = Object.values(KEYS)
@@ -29,6 +30,7 @@ const OPTIONS = {
   openaiApiKey: KEYS.openai,
   anthropicApiKey: '',
   zaiApiKey: '',
+  xaiApiKey: KEYS.xai,
   customEndpoints: ['gw=http://gw.example.internal:4000/v1', `broken=${KEYS.gw}`, 'nourl='],
   contextWindows: [`bad=${KEYS.openai}`],
 }
@@ -36,6 +38,7 @@ const OPTIONS = {
 const ENV: Record<string, string> = {
   ROUTER_ANTHROPIC_API_KEY: KEYS.anthropic,
   ZAI_API_KEY: KEYS.zai,
+  XAI_API_KEY: KEYS.xai,
   ROUTER_CUSTOM_API_KEYS: `gw=${KEYS.gw},${KEYS.openai}`,
 }
 
@@ -62,6 +65,7 @@ const ROUTES = [
   { model: 'openai:gpt-5', route: { provider: 'openai', model: 'gpt-5' } },
   { model: 'anthropic:claude-sonnet-4-5', route: { provider: 'anthropic', model: 'claude-sonnet-4-5' } },
   { model: 'zai:glm-5.3', route: { provider: 'zai', model: 'glm-5.3' } },
+  { model: 'xai:grok-4.7', route: { provider: 'xai', model: 'grok-4.7' } },
   { model: 'custom:gw:llama-3', route: { provider: 'custom', name: 'gw', model: 'llama-3' } },
 ] as const
 
@@ -69,7 +73,7 @@ describe('no key value in any output', () => {
   test('config warnings and missing-key messages', async () => {
     const c = await loadConfig(env, OPTIONS)
     expect(c.warnings.length >= 3).toBe(true)
-    assertClean('warnings', [c.warnings, missingKeyMessage('openai'), missingKeyMessage('anthropic'), missingKeyMessage('zai')])
+    assertClean('warnings', [c.warnings, missingKeyMessage('openai'), missingKeyMessage('anthropic'), missingKeyMessage('zai'), missingKeyMessage('xai')])
   })
 
   test('routed steps: provider errors echoing the key, thrown errors, success', async () => {
@@ -149,6 +153,7 @@ describe('no key value in any output', () => {
     const outputs: unknown[] = []
     outputs.push(await drain($.turn.step(step('openai:gpt-5')) as any))
     outputs.push(await drain($.turn.step(step('zai:glm-5.3', { agentId: 'ag-2' })) as any))
+    outputs.push(await drain($.turn.step(step('xai:grok-4.7', { agentId: 'ag-3' })) as any))
     outputs.push(await ($ as any).command.run({ command: 'providers', args: '' }))
     outputs.push(await ($ as any).command.run({ command: 'providers', args: 'models' }))
     assertClean('plugin', outputs)

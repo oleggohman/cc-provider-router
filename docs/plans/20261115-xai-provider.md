@@ -75,11 +75,11 @@ One task, because adding `xai` to `SimpleProvider` makes `routedStep` hand xAI r
 **Files:**
 - Modify: `hooks/limits.ts`, `hooks/limits.test.ts`, `hooks/providers-command.ts`, `hooks/providers-command.test.ts`, `hooks/secrets.test.ts`
 
-- [ ] write tests: `maxOutputTokens` and `windowFor` for `xai:grok-4.7`, `xai:grok-4.7-latest`, `xai:grok-4.3`, `xai:grok-4.20-0309-reasoning`, `xai:grok-4.20-multi-agent-0309`, `xai:grok-build-0.1`; an unknown `xai:` id outside the `grok-4` family gets the default; a `contextWindows` entry for an exact `xai:` id wins over the row
-- [ ] write tests: `/providers` lists an `xai` row with its base URL and key status; `/providers models` calls `GET https://api.x.ai/v1/models` with the bearer key and lists the ids (as the `openai` row does); an unkeyed `xai` row is skipped with no call
-- [ ] extend `hooks/secrets.test.ts` so the xAI key appears in no output (errors, `/providers`, `/providers models` failures)
-- [ ] implement the rows in `MODEL_LIMITS` and `rows()`
-- [ ] run tests, typecheck, validate - must pass before Task 3
+- [x] write tests: `maxOutputTokens` and `windowFor` for `xai:grok-4.7`, `xai:grok-4.7-latest`, `xai:grok-4.3`, `xai:grok-4.20-0309-reasoning`, `xai:grok-4.20-multi-agent-0309`, `xai:grok-build-0.1`; an unknown `xai:` id outside the `grok-4` family gets the default; a `contextWindows` entry for an exact `xai:` id wins over the row
+- [x] write tests: `/providers` lists an `xai` row with its base URL and key status; `/providers models` calls `GET https://api.x.ai/v1/models` with the bearer key and lists the ids (as the `openai` row does); an unkeyed `xai` row is skipped with no call
+- [x] extend `hooks/secrets.test.ts` so the xAI key appears in no output (errors, `/providers`, `/providers models` failures)
+- [x] implement the rows in `MODEL_LIMITS` and `rows()`
+- [x] run tests, typecheck, validate - must pass before Task 3
 
 ### Task 3: Docs and smoke case
 

@@ -21,6 +21,12 @@ const MODEL_LIMITS: [string, Limits][] = [
   ['anthropic:claude-haiku', { window: 200000, maxOutput: 64000 }],
   ['zai:glm-4.5', { window: 128000, maxOutput: 32768 }],
   ['zai:glm', { window: 200000, maxOutput: 32768 }],
+  // xAI: specific families first. The 32768 output limits are assumptions
+  // (xAI publishes no maximum); see the README.
+  ['xai:grok-build', { window: 256000, maxOutput: 32768 }],
+  ['xai:grok-4.20', { window: 1000000, maxOutput: 32768 }],
+  ['xai:grok-4.3', { window: 1000000, maxOutput: 32768 }],
+  ['xai:grok-4', { window: 500000, maxOutput: 32768 }],
 ]
 
 // Output limit for ids without a row (every custom: model): small enough for
