@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { compactThreshold, maybeCompact, type UsageMap } from './context.ts'
-import { fetchSide, markStep, onSubagentTurnEnd, onUnprefixedStep, routedStep } from './register.ts'
+import { fetchSide, markStep, onSubagentTurnEnd, onUnprefixedStep, register, routedStep } from './register.ts'
 import { classifyModel } from './route.ts'
-import { SHADOW_MODEL, endShadow, latestJob, resetShadow, sessionFlags, shadowFetch, shadowStats } from './shadow.ts'
+import { SHADOW_MODEL, beginShadow, endShadow, latestJob, noteStep, resetShadow, sessionFlags, shadowFetch, shadowStats } from './shadow.ts'
 import type { ThreadState } from './thread.ts'
 import type { TransportCache } from './transport.ts'
 import { cfg, drain, engine, provider, sleeper, step, tick } from '../tests/harness.ts'
@@ -212,6 +212,97 @@ test('fetchSide: $.http.fetch when curl cannot be started', async () => {
   expect(side.transport).toBe('fetch')
   await side.fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: {}, body: '{}' })
   expect(f.fetched).toEqual(['https://api.openai.com/v1/chat/completions'])
+})
+
+// The `http.fetch` hook as register wires it (the kit's `$` has no `http`
+// noun, so the registered hook cannot be driven through the plugin): `register`
+// is called with a recording `on`, and the hook it registered, with its
+// `.catch`, is run with the fake `$` above.
+describe('the registered http.fetch hook', () => {
+  const SHADOW_URL = 'https://api.anthropic.com/v1/messages?beta=true'
+
+  function registered(options: Record<string, unknown> = {}) {
+    const hooks = new Map<string, { hook: any; failed?: any }>()
+    const on = (name: string, ...rest: any[]) => {
+      const entry = { hook: rest[rest.length - 1], failed: undefined as any }
+      hooks.set(name, entry)
+      return { catch: (h: any) => void (entry.failed = h) }
+    }
+    register(on as any, options as any)
+    return hooks.get('http.fetch')!
+  }
+
+  // An engine request of the main loop: `next.origin` as the host sets it.
+  function engineFetch(body: Record<string, unknown>, headers: Record<string, string> = {}) {
+    const init = { method: 'POST', headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', ...headers }, body: JSON.stringify(body), compress: 'gzip' }
+    return { url: SHADOW_URL, init }
+  }
+
+  function network() {
+    const calls: any[] = []
+    const next = Object.assign((e: any) => (calls.push(e), { value: { status: 200, ok: true, headers: {}, text: '{"network":true}' } }), {
+      origin: { plugin: 'engine', tier: 'core' },
+      signal: new AbortController().signal,
+      called: false,
+      error: { kind: 'throw', budget: 100 },
+    })
+    return { calls, next }
+  }
+
+  const shadowBody = { model: SHADOW_MODEL, messages: [{ role: 'user', content: 'hi' }], system: [{ type: 'text', text: 'SYS' }], max_tokens: 32000, metadata: { user_id: 'u' }, stream: true }
+  const classifierBody = { max_tokens: 64, messages: [{ role: 'user', content: '<transcript>x</transcript>' }], metadata: { user_id: 'u' }, model: 'claude-sonnet-5', stop_sequences: ['</severity>'], system: [{ type: 'text', text: 'You are a security monitor for autonomous AI coding agents.' }], thinking: { type: 'disabled' } }
+  const CLASSIFIER_HEADERS = { 'anthropic-beta': 'claude-code-20250219,auto-mode-classifier-2026-07-16,claude-code-side-query-2026-09-29', 'x-stainless-timeout': '60' }
+
+  test('a captured shadow request is answered by the handler with the side built from the hook\'s own $ (curl), zero network calls', async () => {
+    resetShadow()
+    const { hook, failed } = registered()
+    expect(typeof failed).toBe('function')
+    const f = fake$()
+    const net = network()
+    const got: any[] = []
+    const job = beginShadow('main', { messageCount: 1, handler: async (_body, side) => (got.push(side), 'SSE') })
+    try {
+      const out: any = await hook(f.$, engineFetch(shadowBody), net.next)
+      expect(out.value.text).toBe('SSE')
+      expect(got.length).toBe(1)
+      expect(got[0].transport).toBe('curl')
+      expect(got[0].signal).toBe(net.next.signal)
+      expect(f.spawned.some((s: any) => s.argv.includes('--version'))).toBe(true)
+      expect(net.calls.length).toBe(0)
+    } finally {
+      endShadow('main', job.id)
+    }
+  })
+
+  test('the .catch refuses a request while a shadow is pending, so a hook overrun never lets it out', async () => {
+    resetShadow()
+    const { failed } = registered()
+    const net = network()
+    const job = beginShadow('main', { messageCount: 1 })
+    try {
+      const out: any = await failed(undefined, engineFetch({ model: 'claude-haiku-4-5', messages: [] }), net.next)
+      expect(out.value.status).toBe(400)
+      expect(net.calls.length).toBe(0)
+    } finally {
+      endShadow('main', job.id)
+    }
+  })
+
+  test('autoModeClassifier: false from the options reaches the hook and its .catch: a classifier request is refused once a step was routed', async () => {
+    resetShadow()
+    noteStep(true)
+    const off = registered({ autoModeClassifier: false })
+    const f = fake$()
+    const net = network()
+    const ev = engineFetch(classifierBody, CLASSIFIER_HEADERS)
+    expect(((await off.hook(f.$, ev, net.next)) as any).value.status).toBe(400)
+    expect(((await off.failed(undefined, ev, net.next)) as any).value.status).toBe(400)
+    expect(net.calls.length).toBe(0)
+    // The shipped default lets it through.
+    const on = registered()
+    expect(((await on.hook(f.$, ev, net.next)) as any).value.text).toBe('{"network":true}')
+    expect(net.calls.length).toBe(1)
+  })
 })
 
 test('/providers shows the autoModeClassifier option and the classifier counters', { options: { autoModeClassifier: false } }, async ($, on) => {
