@@ -1,6 +1,6 @@
 {
   "name": "cc-provider-router",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Claude Code mod: route model requests to other providers by model-id prefix.",
   "license": "MIT",
