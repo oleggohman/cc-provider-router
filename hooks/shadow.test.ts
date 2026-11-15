@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
 import { ID_FORMS, classifyModel } from './route.ts'
-import { SHADOW_MODEL, ShadowError, beginShadow, endShadow, isEngineRequest, noteStep, resetShadow, sessionFlags, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
+import { SHADOW_MODEL, ShadowError, beginShadow, closeShadow, endShadow, isEngineRequest, latestJob, noteStep, openShadow, resetShadow, sessionFlags, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
 import { cfg, drain, sleeper, tick, ZERO } from '../tests/harness.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the engine
@@ -767,6 +767,74 @@ describe('jobs: beginShadow / endShadow', () => {
     expect(job.body.model).toBe(SHADOW_MODEL)
     expect(net.calls.length).toBe(0)
     endShadow('main', job.id)
+  })
+})
+
+describe('jobs: openShadow / closeShadow (the turn.step side)', () => {
+  test('openShadow is refused while routing is off: nothing pending, the breaker text, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    const opened = openShadow('main', { messageCount: 1 })
+    // Uncaptured, no Esc, no engine request seen: the breaker trips.
+    const err = closeShadow('main', opened, { aborted: false })
+    expect(err instanceof ShadowError).toBe(true)
+    expect(String(err)).toContain('not captured')
+    expect(String(err)).toContain('routing is off')
+    expect(shadowStats().blind).toBe(true)
+    let refused: unknown
+    try {
+      openShadow('main', { messageCount: 1 })
+    } catch (x) {
+      refused = x
+    }
+    expect(refused instanceof ShadowError).toBe(true)
+    expect(String(refused)).toContain('routing is off')
+    expect(shadowStats().pending).toBe(0)
+    // A shadow request while off matches nothing and is refused.
+    expect((await send(net, { messages: 1 })).status).toBe(400)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('closeShadow: Esc, or an engine request seen meanwhile, does not trip the breaker; the failure is named', async () => {
+    resetShadow()
+    const net = network()
+    const esc = openShadow('main', { messageCount: 1 })
+    const a = closeShadow('main', esc, { aborted: true, failure: new Error('aborted here') })
+    expect(String(a)).toContain('aborted here')
+    expect(String(a)).not.toContain('routing is off')
+    expect(shadowStats().blind).toBe(false)
+    const seen = openShadow('main', { messageCount: 1 })
+    // Refused (inconsistent count), but an engine request the hook saw.
+    expect((await send(net, { messages: 7 })).status).toBe(400)
+    expect(String(closeShadow('main', seen, { aborted: false }))).not.toContain('routing is off')
+    expect(shadowStats().blind).toBe(false)
+    expect(shadowStats().pending).toBe(0)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('closeShadow on a captured job: no error, the job ended', async () => {
+    resetShadow()
+    const net = network()
+    const opened = openShadow('a1', { messageCount: 1 })
+    expect((await send(net, { agent: 'a1', messages: 1 })).status).toBe(200)
+    expect(closeShadow('a1', opened, { aborted: false, failure: new Error('later') })).toBe(undefined)
+    expect(shadowStats().pending).toBe(0)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('latestJob names the newest job begun on a loop; a stale close leaves it', () => {
+    resetShadow()
+    expect(latestJob('a1')).toBe(undefined)
+    const old = openShadow('a1', { messageCount: 1 })
+    endShadow('a1', old.job.id)
+    const fresh = openShadow('a1', { messageCount: 1 })
+    expect(latestJob('a1')).toBe(fresh.job.id)
+    closeShadow('a1', old, { aborted: true })
+    expect(shadowStats().pending).toBe(1)
+    expect(latestJob('a1')).toBe(fresh.job.id)
+    endShadow('a1', fresh.job.id)
+    resetShadow()
+    expect(latestJob('a1')).toBe(undefined)
   })
 })
 

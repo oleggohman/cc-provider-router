@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { cfg, drain, sleeper, provider, ZERO } from '../tests/harness.ts'
+import { cfg, drain, engineReads, sleeper, provider, tick } from '../tests/harness.ts'
 import { routedStep, type AgentRef } from './register.ts'
 import { resetShadow, shadowFetch } from './shadow.ts'
 import { dropBase, normalizeBody, resolveThread, type ThreadState } from './thread.ts'
@@ -298,9 +298,12 @@ describe('normalizeBody', () => {
 // The host-set `next.origin` of a request the engine raised.
 const ENGINE = { origin: { plugin: 'engine', tier: 'core' } }
 
-// An engine stand-in that sends one given body per step through shadowFetch.
+// An engine stand-in that sends one given body per step through shadowFetch
+// and reads the answer as the engine does (tests/harness.ts engineReads).
+// `answers` holds each answer it got (the SSE carries the minted message id).
 function threadEngine(bodies: any[]) {
   const network: any[] = []
+  const answers: any[] = []
   let i = 0
   const next = async function* (e: any): AsyncGenerator<any, any> {
     const headers: Record<string, string> = { 'x-claude-code-session-id': 's1' }
@@ -310,12 +313,17 @@ function threadEngine(bodies: any[]) {
       network.push(x)
       return { value: { status: 200, ok: true, headers: {}, text: '' } }
     }
-    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, Object.assign(beneath, ENGINE), { autoModeClassifier: true })
-    yield { kind: 'stop', stopReason: 'end_turn', usage: ZERO }
-    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [] }
+    const out: any = await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, Object.assign(beneath, ENGINE), { autoModeClassifier: true })
+    answers.push(out?.value)
+    const read = engineReads(e, out?.value)
+    for (const c of read.chunks) yield c
+    return read.result
   }
-  return { network, next }
+  return { network, answers, next }
 }
+
+// The message id minted for an answer (its SSE `message_start`).
+const mintedIn = (answer: any) => /"id":"(msg_pr_[^"]+)"/.exec(answer?.text ?? '')?.[1]
 
 describe('routed steps across a thread', () => {
   const route = { provider: 'zai', model: 'glm-5.3' } as const
@@ -368,15 +376,46 @@ describe('routed steps across a thread', () => {
     expect(sent.messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: first.result.answer }] })
   })
 
-  test('a cancelled step (Esc) records nothing: the next continue builds on the last recorded turn', async () => {
+  const cancelledBody = {
+    model: 'provider-router-shadow',
+    thread: { type: 'continue', previous_message_id: 'msg_hook_1' },
+    system: [BILLING],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'CANCELLED-INPUT' }] }],
+  }
+
+  test('Esc before the request was captured records nothing: the next continue builds on the last recorded turn', async () => {
     resetShadow()
-    const cancelledBody = {
-      model: 'provider-router-shadow',
-      thread: { type: 'continue', previous_message_id: 'msg_hook_1' },
-      system: [BILLING],
-      messages: [{ role: 'user', content: [{ type: 'text', text: 'CANCELLED-INPUT' }] }],
+    const inner = threadEngine([createBody, continueBody])
+    const esc = new AbortController()
+    let i = 0
+    // Step 1: Esc before the engine sent its request.
+    const next = async function* (ev: any): AsyncGenerator<any, any> {
+      if (i++ === 1) {
+        esc.abort()
+        return { turnId: ev.turnId, index: ev.index, answer: '', toolUses: [], stopReason: null, usage: null }
+      }
+      return yield* inner.next(ev)
     }
-    const eng = threadEngine([createBody, cancelledBody, continueBody])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const threads = new Map<string, ThreadState>()
+    const live = new AbortController().signal
+    await drain(routedStep(e(0), next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal: live }, threads))
+    const recorded = structuredClone(threads.get('main'))
+    const cancelled = await drain(routedStep(e(1), next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal: esc.signal }, threads))
+    expect(cancelled.chunks).toEqual([])
+    expect(cancelled.result.answer).toBe('')
+    expect(threads.get('main')).toEqual(recorded)
+    const third = await drain(routedStep(e(2), next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal: live }, threads))
+    expect(third.result.answer).toBe('SMOKE')
+    const sent = JSON.parse(p.calls[1]!.init.body)
+    expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(sent.messages[1].content).toEqual(REPLY)
+    expect(inner.network.length).toBe(0)
+  })
+
+  test('Esc during the provider call records nothing and drops the conversation: the next create works, a continue is never sent partial', async () => {
+    resetShadow()
+    const eng = threadEngine([createBody, cancelledBody, continueBody, createBody])
     const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
     const esc = new AbortController()
     const bodies: string[] = []
@@ -395,12 +434,19 @@ describe('routed steps across a thread', () => {
     const cancelled = await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: esc.signal }, threads))
     expect(cancelled.chunks).toEqual([])
     expect(cancelled.result.answer).toBe('')
-    const third = await drain(routedStep(e(2), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: live }, threads))
-    expect(third.result.answer).toBe('SMOKE')
-    const sent = JSON.parse(bodies[2]!)
-    expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
-    expect(sent.messages[1].content).toEqual(REPLY)
-    expect(JSON.stringify(sent)).not.toContain('CANCELLED-INPUT')
+    expect(eng.answers[1].text).toContain('msg_shadow')
+    const after = threads.get('main')!
+    expect(after.base).toBe(undefined)
+    expect(JSON.stringify(after.system)).toContain('You are an agent.')
+    expect(after.tools!.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+    // A continue now (no history) is the clear error, nothing sent.
+    const lost = await drain(routedStep(e(2), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: live }, threads))
+    expect(lost.result.answer).toContain('/clear')
+    expect(bodies.length).toBe(2)
+    // What the engine sends after Esc: a fresh create, which works.
+    const fresh = await drain(routedStep(e(3), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: live }, threads))
+    expect(fresh.result.answer).toBe('SMOKE')
+    expect(JSON.stringify(JSON.parse(bodies[2]!))).not.toContain('CANCELLED-INPUT')
     expect(eng.network.length).toBe(0)
   })
 
@@ -459,6 +505,100 @@ describe('routed steps across a thread', () => {
     expect(sent.messages[3].content).toEqual([{ type: 'text', text: 'PARTIAL' }])
     // The interrupted reply's tool call is never sent without its result.
     expect(JSON.stringify(sent.messages).split('"tool_use"').length - 1).toBe(1)
+    expect(eng.network.length).toBe(0)
+  })
+
+  test('an interrupted first create keeps its system prompt and effective tools; the next continue is rebuilt from history with them', async () => {
+    for (const ending of ['closed', 'left'] as const) {
+      resetShadow()
+      const eng = threadEngine([createBody, continueBody])
+      const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+      const threads = new Map<string, ThreadState>()
+      const signal = new AbortController().signal
+      const g = routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads)
+      expect((await g.next()).done).toBe(false)
+      if (ending === 'closed') await g.return(undefined)
+      const after = threads.get('main')!
+      expect([ending, after.base]).toEqual([ending, undefined])
+      expect(JSON.stringify(after.system)).toContain('You are an agent.')
+      expect(after.tools!.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+      if (ending === 'left') {
+        resetShadow()
+        continue
+      }
+      const history = [createBody.messages[0], { role: 'assistant', content: REPLY }, ...continueBody.messages]
+      const ok = await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => history }, threads))
+      expect(ok.result.answer).toBe('SMOKE')
+      const sent = JSON.parse(p.calls[1]!.init.body)
+      expect(sent.tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+      expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
+      expect(eng.network.length).toBe(0)
+    }
+  })
+
+  test('an interrupted step keeps the tools its additions and removals left in force', async () => {
+    resetShadow()
+    const GONE = { name: 'Gone', input_schema: { type: 'object' } }
+    const NEW = { name: 'mcp__x__new', description: 'new', input_schema: { type: 'object' } }
+    const create = { ...createBody, tools: [BASH, PLACEHOLDER, GONE] }
+    const changing = {
+      ...continueBody,
+      messages: [
+        ...continueBody.messages,
+        {
+          role: 'system',
+          content: [
+            { type: 'tool_addition', tool: { type: 'tool_definition', definition: NEW } },
+            { type: 'tool_removal', tool: { type: 'tool_reference', name: 'Gone' } },
+          ],
+        },
+      ],
+    }
+    const eng = threadEngine([create, changing])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: toolReply }])
+    const threads = new Map<string, ThreadState>()
+    const signal = new AbortController().signal
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    expect(threads.get('main')!.tools!.map((t: any) => t.name)).toEqual(['Bash', 'Gone', 'mcp__x__late'])
+    const g = routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads)
+    await g.next()
+    await g.return(undefined)
+    const after = threads.get('main')!
+    expect(after.base).toBe(undefined)
+    expect(after.tools!.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late', 'mcp__x__new'])
+    expect(eng.network.length).toBe(0)
+  })
+
+  test("anchors: each recorded reply binds its minted id; a continue from an earlier reply's id (a rewind) drops the turns after it", async () => {
+    resetShadow()
+    const u = (t: string) => [{ role: 'user', content: [{ type: 'text', text: t }] }]
+    const reply = (t: string) => ({ status: 200, text: JSON.stringify({ content: [{ type: 'text', text: t }], stop_reason: 'end_turn', usage: { input_tokens: 6, output_tokens: 1 } }) })
+    const bodies: any[] = [createBody]
+    const eng = threadEngine(bodies)
+    const p = provider([reply('R1'), reply('R2'), reply('R3'), reply('R4')])
+    const threads = new Map<string, ThreadState>()
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
+    const cont = (anchor: string, text: string) => ({ model: 'provider-router-shadow', thread: { type: 'continue', previous_message_id: anchor }, system: [BILLING], messages: u(text) })
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const id1 = mintedIn(eng.answers[0])!
+    // The create's two messages and the reply.
+    expect(threads.get('main')!.anchors).toEqual({ [id1]: 3 })
+    bodies.push(cont(id1, 'TWO'))
+    await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const id2 = mintedIn(eng.answers[1])!
+    expect(id2).not.toBe(id1)
+    expect(threads.get('main')!.anchors).toEqual({ [id1]: 3, [id2]: 5 })
+    bodies.push(cont(id2, 'THREE'))
+    await drain(routedStep(e(2), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(JSON.stringify(JSON.parse(p.calls[2]!.init.body).messages)).toContain('R2')
+    // Rewind to the first reply.
+    bodies.push(cont(id1, 'REDO-TWO'))
+    await drain(routedStep(e(3), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const text = JSON.stringify(JSON.parse(p.calls[3]!.init.body).messages)
+    expect(text).toContain('R1')
+    expect(text).toContain('REDO-TWO')
+    expect(text).not.toContain('R2')
+    expect(text).not.toContain('THREE')
     expect(eng.network.length).toBe(0)
   })
 

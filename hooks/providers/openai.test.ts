@@ -222,7 +222,8 @@ describe('routed step: openai and custom', () => {
     expect(sent.metadata).toBeUndefined()
     expect(sent.thinking).toBeUndefined()
     expect(sent.stream).toBeUndefined()
-    expect(JSON.stringify(chunks)).not.toContain('ENGINE-STUB-CHUNK')
+    // The engine was answered with the reply as SSE; its chunks are the step's.
+    expect(eng.answers[0].text).toContain('"id":"msg_pr_')
     expect(chunks.map(c => c.kind)).toEqual(['text', 'tool', 'input', 'stop'])
     expect(chunks[2]).toEqual({ kind: 'input', index: 1, json: '{"command":"ls"}' })
     expect(result.toolUses).toEqual([{ name: 'Bash', input: { command: 'ls' } }])

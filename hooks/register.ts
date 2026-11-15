@@ -1,21 +1,36 @@
 // The plugin's hooks module: registers the `http.fetch` shadow capture, the
 // routed `turn.step`, compaction on `turn.complete`, and `/providers`; and
-// `routedStep`, one routed step from shadow capture to provider reply.
+// `routedStep`, one routed step: the engine's request answered in place with
+// the provider's reply, then the delivery decision.
 
 import type { Register } from 'claude-code'
-import { DEFAULT_TIMEOUT_MS, raceCall, type AdapterResult, type Fetch, type FetchSide, type Sleep } from './call.ts'
-import { toChunks, toResult } from './chunks.ts'
-import { autoModeClassifierOf, loadConfig, missingKeyMessage, secretsOf, type Config } from './config.ts'
-import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
+import { answerShadow, providerSend, type AnswerJob } from './answer.ts'
+import { DEFAULT_TIMEOUT_MS, type Fetch, type FetchSide, type Sleep } from './call.ts'
+import type { Reply } from './chunks.ts'
+import { autoModeClassifierOf, loadConfig, secretsOf, type Config } from './config.ts'
+import { maybeCompact, recordUsage, type UsageMap } from './context.ts'
 import { PREFIX, errorChunks, localError, sanitize } from './errors.ts'
-import { maxOutputTokens } from './limits.ts'
-import { ANTHROPIC_ROWS, complete as anthropicComplete } from './providers/anthropic.ts'
-import { complete as openaiComplete, targetFor } from './providers/openai.ts'
 import { providersCommand } from './providers-command.ts'
-import { buildRequest, type ProviderRequest } from './request.ts'
 import { ID_FORMS, classifyModel, prefixOf, routeLabel, type ModelKind, type Route } from './route.ts'
-import { loopKeyOf, noteStep, shadowFetch, shadowFetchFailed, shadowStats, shadowStep, type ShadowOptions, type ShadowStepEvent } from './shadow.ts'
-import { dropBase, normalizeBody, recordStep, resolveThread, type Recovery, type Threads } from './thread.ts'
+import {
+  SHADOW_MODEL,
+  closeShadow,
+  endShadow,
+  latestJob,
+  loopKeyOf,
+  noteStep,
+  openShadow,
+  shadowFetch,
+  shadowFetchFailed,
+  shadowStats,
+  type OpenedShadow,
+  type ShadowError,
+  type ShadowHandler,
+  type ShadowOptions,
+  type ShadowStepEvent,
+} from './shadow.ts'
+import { sameDelivery } from './sse.ts'
+import { dropBase, recordStep, type Recovery, type Threads } from './thread.ts'
 import { checkCurl, curlFetch, fallbackFetch, selectTransport, type Spawn, type TransportCache, type TransportKind } from './transport.ts'
 
 // What the router keeps per loop between steps.
@@ -265,16 +280,36 @@ async function recoveryFor(body: any, agentId: string | undefined, threads: Thre
   return { history, fallback: forked === undefined ? undefined : threads.get(forked) }
 }
 
-// A routed step: shadow capture, provider request, reply. The engine's own
-// shadow chunks are drained inside shadowStep and never yielded here.
+// The engine's result reflects the staged reply (sse.ts sameDelivery); a
+// result of any other shape does not.
+function delivered(result: any, reply: Reply): boolean {
+  if (!result || typeof result !== 'object' || typeof result.answer !== 'string' || !Array.isArray(result.toolUses)) return false
+  return sameDelivery(result, reply)
+}
+
+// A routed step, answered in place: the step registers a job for its loop
+// whose handler (answer.ts answerShadow, run by the `http.fetch` hook) answers
+// the engine's shadow request with the provider's reply as SSE; the engine's
+// own chunks flow up from here; after the stream the step decides delivery
+// from the job and the engine's result.
 //
-// Thread-state invariants (thread.ts): a step that reached the provider and
-// failed is recorded with its error text as the assistant turn (the engine
-// records it so); a step cancelled before its reply was delivered records
-// nothing; a step whose delivery was cut short, or that failed before its
-// request was captured, drops the loop's conversation, since the engine
-// records a turn the router cannot place. A step is recorded only once its
-// reply is delivered (see deliver).
+// Chunks the engine yields before the job was handed its answer are held:
+// sent on once the answer is the reply, dropped when it is the empty stub (an
+// error: the error chunks follow; Esc: nothing) or never came.
+//
+// Delivery (thread-state invariants, thread.ts). The handler keeps the step's
+// system prompt and effective tools on the loop at capture, without its
+// conversation, so any step cut short after capture has already dropped it.
+// Then: a handed reply whose result matches (answer trimmed, tool arguments
+// in any key order, the stop reason) with no Esc is recorded, the minted id
+// bound as an anchor; a mismatch keeps it dropped. A handed error is recorded
+// with its error text once the error chunks were read to the end without
+// Esc. Esc records nothing (before capture the loop is left as it was). A
+// step never captured, or captured but never handed, drops the conversation.
+// A job is ended by the stream's `finally` or, when the dispatch is
+// abandoned without one (the hook's budget), by the signal's abort listener;
+// a late continuation touches the loop's state only while its job is the
+// loop's newest.
 export async function* routedStep<E extends StepEvent>(
   e: E,
   next: (e: E) => AsyncIterable<unknown>,
@@ -292,59 +327,113 @@ export async function* routedStep<E extends StepEvent>(
   }
   // Check the key / endpoint before the shadow step: no engine work for a
   // step that cannot be answered.
-  let send: (request: ProviderRequest) => Promise<AdapterResult>
-  if (route.provider === 'anthropic' || route.provider === 'zai') {
-    const row = ANTHROPIC_ROWS[route.provider]
-    const apiKey = cfg.keys[route.provider]
-    if (!apiKey) return yield* early(missingKeyMessage(route.provider))
-    send = request => anthropicComplete(io.fetch, request, row, apiKey, secrets)
-  } else {
-    const t = targetFor(route, cfg)
-    if (!t.ok) return yield* early(t.message)
-    send = request => openaiComplete(io.fetch, request, e.effort, t.target, secrets)
-  }
-  let body: any
+  const target = providerSend(route, cfg, e.effort, io.fetch)
+  if (!target.ok) return yield* early(target.message)
+  let job: AnswerJob | undefined
+  // Called by the `http.fetch` hook for the captured request, with that
+  // hook's transport (`side`); the step's own io stands in without one.
+  const handler: ShadowHandler = (body, side) =>
+    answerShadow(job!, body, { event: e, route, config: cfg, threads }, {
+      fetch: side?.fetch ?? io.fetch,
+      sleep: side?.sleep ?? io.sleep,
+      signal: side?.signal ?? io.signal,
+      timeoutMs: io.timeoutMs,
+      recovery: b => recoveryFor(b, e.agentId, threads, io),
+      transport: side?.transport ?? 'fetch',
+    })
+  let opened: OpenedShadow
   try {
-    body = await shadowStep(e, next, io.signal)
+    opened = openShadow(key, { messageCount: e.messageCount, handler })
   } catch (err) {
-    // Esc during the shadow step ends the step as cleanly as Esc during the
-    // provider call.
-    if (io.signal.aborted) return cancelled(e)
     return yield* early(`shadow request failed: ${String(err)}`)
   }
-  // Message threads: rebuild a continue into the full conversation.
-  const resolved = resolveThread(body, threads.get(key), await recoveryFor(body, e.agentId, threads, io))
-  if (!resolved.ok) return yield* early(resolved.message)
-  const request = buildRequest(normalizeBody(resolved.body), route.model, maxOutputTokens(e.model))
-  // A reply counts as delivered once the engine has read every chunk, the
-  // stop chunk included, and asked for the result without Esc. Only then is
-  // the step recorded. Until then the loop keeps this step's system prompt
-  // and tools but no conversation: a delivery cut short (Esc, the stream
-  // closed or left) leaves the engine with an unknown part of the reply, so
-  // the next continue is rebuilt from the session history instead of
-  // resending a reply (and tool calls) the engine never took.
-  const { body: sent, anchors } = resolved
-  function* deliver<R>(chunks: Generator<any, R, unknown>, assistant: any[]): Generator<any, R, unknown> {
-    recordStep(threads, key, sent, assistant, anchors)
-    const done = threads.get(key)!
-    dropBase(threads, key)
-    const result = yield* chunks
-    if (!io.signal.aborted) threads.set(key, done)
+  const current = opened.job as AnswerJob
+  job = current
+  const newest = () => latestJob(key) === current.id
+  // Abandoned without a `finally` (Esc, the hook's budget, the dispatch
+  // given up): the job ends here and a late answer is discarded.
+  const onAbort = () => {
+    if (current.phase !== 'handed') current.phase = 'abandoned'
+    endShadow(key, current.id)
+  }
+  io.signal.addEventListener('abort', onAbort, { once: true })
+  const handed = () => (current.phase === 'handed' ? current.outcome : undefined)
+  const it = next({ ...e, model: SHADOW_MODEL })[Symbol.asyncIterator]()
+  const held: unknown[] = []
+  let result: any
+  let failure: unknown
+  let ended = false
+  let uncaptured: ShadowError | undefined
+  try {
+    while (true) {
+      const s = await it.next()
+      if (s.done) {
+        result = s.value
+        break
+      }
+      const outcome = handed()
+      if (outcome?.kind === 'reply') {
+        yield* held.splice(0)
+        yield s.value
+      } else if (!outcome) held.push(s.value)
+    }
+    ended = true
+  } catch (err) {
+    failure = err
+    ended = true
+  } finally {
+    io.signal.removeEventListener('abort', onAbort)
+    if (!ended) {
+      // Closed or left mid-stream: the engine's stream is closed too.
+      try {
+        await it.return?.()
+      } catch {
+        // The engine's own close failing changes nothing here.
+      }
+    }
+    if (current.phase !== 'handed') current.phase = 'abandoned'
+    uncaptured = closeShadow(key, opened, { aborted: io.signal.aborted, failure })
+  }
+  const outcome = handed()
+  if (io.signal.aborted) {
+    // Esc: nothing recorded. A reply already flowing ends as the engine says.
+    return outcome?.kind === 'reply' && !failure ? result : cancelled(e)
+  }
+  if (uncaptured) {
+    if (newest()) dropBase(threads, key)
+    return yield* errorChunks(e, localError(name, `shadow request failed: ${String(uncaptured)}`, secrets))
+  }
+  if (!outcome) {
+    if (newest()) dropBase(threads, key)
+    const why = failure ? `the engine's stream failed: ${String(failure)}` : 'the reply was not handed to Claude Code (its request ended first)'
+    return yield* errorChunks(e, localError(name, why, secrets))
+  }
+  if (outcome.kind === 'cancelled') {
+    // The fetch hook's dispatch ended without Esc here: an empty answer, so
+    // the step says so instead of ending silently.
+    if (newest()) dropBase(threads, key)
+    return yield* errorChunks(e, localError(name, 'the request was cancelled before the reply arrived', secrets))
+  }
+  if (outcome.kind === 'error') {
+    const out = yield* errorChunks(e, outcome.error)
+    // Recorded once the error chunks were read to the end, without Esc.
+    if (newest()) {
+      if (!failure && !io.signal.aborted && current.sent !== undefined) recordStep(threads, key, current.sent, [{ type: 'text', text: outcome.error.text }], current.anchors ?? {})
+      else dropBase(threads, key)
+    }
+    return out
+  }
+  if (failure || !delivered(result, outcome.reply)) {
+    if (newest()) dropBase(threads, key)
+    if (failure) return yield* errorChunks(e, localError(name, `the engine's stream failed: ${String(failure)}`, secrets))
     return result
   }
-  const fail = (err: ReturnType<typeof localError>) => deliver(errorChunks(e, err), [{ type: 'text', text: err.text }])
-  const out = await raceCall(io.sleep, io.signal, () => send(request), io.timeoutMs)
-  switch (out.kind) {
-    case 'cancelled':
-      // Nothing recorded: the next continue builds on the last recorded turn.
-      return cancelled(e)
-    case 'timeout':
-      return yield* fail(localError(name, `no reply within ${out.ms} ms (timed out)`, secrets))
-    case 'failed':
-      return yield* fail(localError(name, `request failed: ${String(out.error)}`, secrets))
-    case 'done':
-      if (!out.value.ok) return yield* fail(withContextHint(out.value.error, e.agentId))
-      yield* deliver(toChunks(out.value.reply), out.value.reply.content)
-      return toResult(e, out.value.reply)
+  if (newest()) {
+    const sent = current.sent
+    const length = (Array.isArray(sent?.messages) ? sent.messages.length : 0) + 1
+    recordStep(threads, key, sent, outcome.reply.content, { ...current.anchors, [outcome.messageId]: length })
   }
+  // The provider's real usage, as before answer in place: the engine's result
+  // carries the SSE's zeros.
+  return { ...result, usage: { ...outcome.reply.usage, model: e.model } }
 }

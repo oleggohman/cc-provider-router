@@ -313,14 +313,15 @@ Why: the host ends any `$.http.fetch` at 30 s (Task 2), in `v0.1.2` too; a `curl
 
 **Files:**
 - Modify: `hooks/register.ts`, `hooks/register.test.ts`, `hooks/thread.test.ts`, `tests/harness.ts`
+- ➕ As built, also: `hooks/shadow.ts`, `hooks/shadow.test.ts` (`openShadow` / `closeShadow` carry the breaker for the step side, `shadowStep` now wraps them; `latestJob` lets a late continuation leave a newer job's loop state alone), `hooks/providers/anthropic.test.ts`, `hooks/providers/openai.test.ts` (a now-vacuous stub-chunk assertion replaced by one on the SSE answer). The harness engine reads its answer as Claude Code does (`engineReads`). Until Task 10 the step's returned result carries the provider's real usage (as `v0.1.2`), so `recordUsage` and compaction keep working
 
-- [ ] write tests for the new `routedStep`: it registers a job with the handler, yields the engine's chunks unchanged, returns the engine's result, and ends the job in `finally`; for an `error` outcome it yields none of the stub's chunks, then `errorChunks`, and returns their result; for a `cancelled` outcome it yields nothing and returns the cancelled result; an early failure (missing key, unknown endpoint) still answers without calling `next`
-- [ ] write one test per row of the "Delivery decision" table
-- [ ] port the thread-invariant tests in `hooks/thread.test.ts` to the new flow: error step recorded with its text; Esc before delivery records nothing; delivery cut short drops the conversation and keeps system and tools; failure before capture drops it; an interrupted first create; an interrupted step with tool additions and removals; an iterator left suspended, not only closed; anchors kept per step
-- [ ] write tests for abandonment: the fetch-side handler lingering after the step's dispatch ended; a timeout followed at once by a new step on the loop; the dispatch's signal aborting while the generator stays suspended (no `.return()`): the job is removed by the listener, the next step on the loop can start, and the old continuation cannot touch the new job; listeners and timers are gone after a job settles
-- [ ] implement the new `routedStep` and wire the `http.fetch` hook to give the handler the transport selected in Task 7 (curl; `$.http.fetch` only as the fallback) and its own `$.clock.sleep`; a test asserts the curl transport is the one the handler receives when curl is available
-- [ ] keep the outer guarantees: the `turn.step` hook's try/catch and `.catch` still turn any failure into a local reply; a prefixed model never reaches the engine with its own id
-- [ ] run tests, typecheck, validate - must pass before Task 9
+- [x] write tests for the new `routedStep`: it registers a job with the handler, yields the engine's chunks unchanged, returns the engine's result, and ends the job in `finally`; for an `error` outcome it yields none of the stub's chunks, then `errorChunks`, and returns their result; for a `cancelled` outcome it yields nothing and returns the cancelled result; an early failure (missing key, unknown endpoint) still answers without calling `next`
+- [x] write one test per row of the "Delivery decision" table
+- [x] port the thread-invariant tests in `hooks/thread.test.ts` to the new flow: error step recorded with its text; Esc before delivery records nothing; delivery cut short drops the conversation and keeps system and tools; failure before capture drops it; an interrupted first create; an interrupted step with tool additions and removals; an iterator left suspended, not only closed; anchors kept per step
+- [x] write tests for abandonment: the fetch-side handler lingering after the step's dispatch ended; a timeout followed at once by a new step on the loop; the dispatch's signal aborting while the generator stays suspended (no `.return()`): the job is removed by the listener, the next step on the loop can start, and the old continuation cannot touch the new job; listeners and timers are gone after a job settles
+- [x] implement the new `routedStep` and wire the `http.fetch` hook to give the handler the transport selected in Task 7 (curl; `$.http.fetch` only as the fallback) and its own `$.clock.sleep`; a test asserts the curl transport is the one the handler receives when curl is available
+- [x] keep the outer guarantees: the `turn.step` hook's try/catch and `.catch` still turn any failure into a local reply; a prefixed model never reaches the engine with its own id
+- [x] run tests, typecheck, validate - must pass before Task 9
 
 ### Task 9: Remove what the new flow no longer uses
 

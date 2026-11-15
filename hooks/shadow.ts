@@ -51,8 +51,8 @@ import { stubSse } from './sse.ts'
 
 export const SHADOW_MODEL = 'provider-router-shadow'
 
-// Where a job is in its loop's shadow step. Only `registered` and `captured`
-// are reached so far; the others are set by the answer-in-place steps.
+// Where a job is in its loop's shadow step. `answered` and `handed` are set by
+// the handler (answer.ts), `abandoned` by the step (register.ts routedStep).
 export type JobPhase =
   | 'registered' // registered, no engine request matched yet
   | 'captured' // the shadow request matched; its body is on the job
@@ -72,6 +72,8 @@ export type Job = { id: number; messageCount: number; phase: JobPhase; body?: an
 // Module-level: a module reload (e.g. a /config change) starts empty, and a
 // stray shadow request is then refused by the no-entry rule.
 const pending = new Map<string, Job>()
+// The newest job id begun per loop (latestJob).
+const latest = new Map<string, number>()
 let jobSeq = 0
 
 // shadowRefused: requests answered locally with the 400.
@@ -112,6 +114,7 @@ export function shadowStats(): { shadowLeaks: number; shadowRefused: number; pen
 // Test helper standing in for a module reload.
 export function resetShadow(): void {
   pending.clear()
+  latest.clear()
   counters.shadowLeaks = 0
   counters.shadowRefused = 0
   breaker.engineSeen = 0
@@ -387,6 +390,7 @@ export function beginShadow(key: string, spec: { messageCount: number; handler?:
   }
   const job: Job = { id: ++jobSeq, messageCount: spec.messageCount, phase: 'registered', handler: spec.handler }
   pending.set(key, job)
+  latest.set(key, job.id)
   return job
 }
 
@@ -394,6 +398,38 @@ export function beginShadow(key: string, spec: { messageCount: number; handler?:
 // id of a job that already ended, does nothing.
 export function endShadow(key: string, id: number): void {
   if (pending.get(key)?.id === id) pending.delete(key)
+}
+
+// The id of the newest job begun on a loop since the module loaded, pending or
+// not: a step's late continuation acts on the loop's thread state only while
+// its job is still the newest.
+export function latestJob(key: string): number | undefined {
+  return latest.get(key)
+}
+
+// A job opened by the turn.step side, with the breaker's count of engine
+// requests at that moment.
+export type OpenedShadow = { job: Job; seen: number }
+
+// Opens a loop's shadow step: refused (ShadowError, so `next` is never
+// called) while the breaker is set, or while the loop has a pending job.
+export function openShadow(key: string, spec: { messageCount: number; handler?: ShadowHandler }): OpenedShadow {
+  if (breaker.blind) throw new ShadowError(BLIND)
+  const seen = breaker.engineSeen
+  return { job: beginShadow(key, spec), seen }
+}
+
+// Ends an opened job, once the engine's stream has ended (success, error,
+// abort, or the stream closed). A job that was never captured gives the
+// ShadowError to report; when that happened without Esc while the hook saw no
+// engine request since openShadow, it also sets the breaker (an engine
+// request seen later clears it).
+export function closeShadow(key: string, opened: OpenedShadow, end: { aborted: boolean; failure?: unknown }): ShadowError | undefined {
+  endShadow(key, opened.job.id)
+  if (opened.job.body !== undefined) return undefined
+  const blind = breaker.engineSeen === opened.seen && !end.aborted
+  if (blind) breaker.blind = true
+  return new ShadowError(`the engine request was not captured${end.failure ? `: ${String(end.failure)}` : ''}${blind ? `; ${BLIND}` : ''}`)
 }
 
 // Runs the shadow step for `e` and returns the engine's captured request.
@@ -404,23 +440,16 @@ export function endShadow(key: string, id: number): void {
 // The stub's chunks are drained here and
 // never yielded.
 export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>, signal?: AbortSignal): Promise<any> {
-  if (breaker.blind) throw new ShadowError(BLIND)
   const key = loopKeyOf(e.agentId)
-  const job = beginShadow(key, { messageCount: e.messageCount })
-  const seenBefore = breaker.engineSeen
+  const opened = openShadow(key, { messageCount: e.messageCount })
   let failure: unknown
   try {
     for await (const _ of next({ ...e, model: SHADOW_MODEL })) void _
   } catch (err) {
     failure = err
-  } finally {
-    // Only once the shadow's stream has ended (success, error or abort).
-    endShadow(key, job.id)
   }
-  if (job.body === undefined) {
-    const blind = breaker.engineSeen === seenBefore && !signal?.aborted
-    if (blind) breaker.blind = true
-    throw new ShadowError(`the engine request was not captured${failure ? `: ${String(failure)}` : ''}${blind ? `; ${BLIND}` : ''}`)
-  }
-  return job.body
+  // Only once the shadow's stream has ended (success, error or abort).
+  const uncaptured = closeShadow(key, opened, { aborted: !!signal?.aborted, failure })
+  if (uncaptured) throw uncaptured
+  return opened.job.body
 }
