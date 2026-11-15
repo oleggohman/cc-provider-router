@@ -14,6 +14,8 @@ describe('maxOutputTokens', () => {
     expect(maxOutputTokens('anthropic:claude-opus-4-6')).toBe(32000)
     expect(maxOutputTokens('anthropic:claude-sonnet-4-5-20250929')).toBe(64000)
     expect(maxOutputTokens('anthropic:claude-haiku-4-5')).toBe(64000)
+    expect(maxOutputTokens('anthropic:claude-fable-5-2')).toBe(128000)
+    expect(maxOutputTokens('anthropic:claude-fable-5')).toBe(128000)
   })
 
   test('unknown ids and every custom: model get the default', () => {
@@ -31,6 +33,7 @@ describe('windowFor', () => {
     expect(windowFor('openai:gpt-4o-mini', none)).toBe(128000)
     expect(windowFor('anthropic:claude-sonnet-4-6', none)).toBe(200000)
     expect(windowFor('anthropic:claude-opus-4-5-20251101', none)).toBe(200000)
+    expect(windowFor('anthropic:claude-fable-5-2', none)).toBe(1000000)
     expect(windowFor('zai:glm-5.3', none)).toBe(200000)
   })
 

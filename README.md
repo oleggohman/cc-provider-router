@@ -288,7 +288,8 @@ a Claude ..." is sent as written.
 - **Output limits are fixed per model** (`max_tokens`, by id prefix):
   `openai:gpt-5*` 128000 (`gpt-5-chat*` 16384), `openai:gpt-4.1*` 32768,
   `openai:gpt-4o*` 16384, `openai:o1*` / `o3*` / `o4-mini*` 100000
-  (`o1-mini` 65536), `anthropic:claude-opus*` 32000,
+  (`o1-mini` 65536), `anthropic:claude-fable*` 128000,
+  `anthropic:claude-opus*` 32000,
   `anthropic:claude-sonnet*` / `claude-haiku*` 64000, `zai:glm*` 32768.
   Everything else, including every `custom:` model, gets 8192, which is not
   configurable: a very long file write on such a model can stop at the limit.

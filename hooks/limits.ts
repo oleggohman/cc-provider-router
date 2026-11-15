@@ -16,6 +16,7 @@ const MODEL_LIMITS: [string, Limits][] = [
   ['openai:o1', { window: 200000, maxOutput: 100000 }],
   ['openai:o3', { window: 200000, maxOutput: 100000 }],
   ['openai:o4-mini', { window: 200000, maxOutput: 100000 }],
+  ['anthropic:claude-fable', { window: 1000000, maxOutput: 128000 }],
   ['anthropic:claude-opus', { window: 200000, maxOutput: 32000 }],
   ['anthropic:claude-sonnet', { window: 200000, maxOutput: 64000 }],
   ['anthropic:claude-haiku', { window: 200000, maxOutput: 64000 }],
