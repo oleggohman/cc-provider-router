@@ -97,8 +97,26 @@ needs a beta header). `hooks/thread.ts` therefore:
   `tool_result` blocks first;
 - records an error step as an assistant text turn (the engine records it the
   same way) and records nothing for a cancelled step;
-- answers a continue with no state (after a `/config` change or plugin reload
-  empties memory) with a clear error asking for `/clear` or `/compact`.
+- binds each continue's `previous_message_id` to the length of the
+  conversation it built on; a continue naming an anchor bound earlier (a
+  `/rewind`) cuts the conversation back to it, and one past the known
+  conversation is the clear error below. Anchors are learned from the
+  continues themselves (the hook never sees the id the engine gives its
+  reply), so a rewind to a point before the last rebuild from history is not
+  detected;
+- rebuilds a continue with no known conversation from
+  `$.session.messages({ as: 'api', agentId })` up to its last assistant turn.
+  A history with no assistant turn is not the thread's: a fork then builds on
+  the forked loop's conversation, anything else gets the clear error;
+- takes the system prompt and tools for a loop it has no state for only from
+  the loop it forks, by `$.agent.list()`: an id the list does not name is an
+  engine fork (compaction, memory) of the main loop, a listed `fork` forks its
+  `parentId` (or main). A listed subagent, or any loop when the list cannot be
+  read, gets none. Known gap: workflow agents are not listed either, so one
+  continuing after a reload is taken for a fork of main;
+- answers a continue it cannot rebuild (after a `/config` change or plugin
+  reload empties memory, with no history, or no system prompt known) with a
+  clear error asking for `/clear` or `/compact`.
 
 Rejected alternative: answering the shadow create with a
 `thread_unsupported_request` 400 to make the engine resend statelessly. Hook

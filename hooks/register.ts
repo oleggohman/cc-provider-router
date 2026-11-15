@@ -52,6 +52,16 @@ async function readHistory($: any, agentId: string | undefined): Promise<any[] |
   }
 }
 
+// The session's agents (`$.agent.list()`); undefined when it cannot say.
+async function readAgents($: any): Promise<AgentRef[] | undefined> {
+  try {
+    const r = await $.agent.list()
+    return Array.isArray(r) ? r : undefined
+  } catch {
+    return undefined
+  }
+}
+
 // The config, loaded once per module load. A rejected load is not kept: the
 // next call loads again (e.g. after an env read was refused once).
 type ConfigCache = { config?: Promise<Config> }
@@ -100,6 +110,7 @@ export const register: Register = (on, options) => {
         sleep: (ms, opts) => $.clock.sleep(ms, opts),
         signal: next.signal,
         history: () => readHistory($, e.agentId),
+        agents: () => readAgents($),
       }
       const result = yield* routedStep(e, next, route, cfg, io, state.threads)
       recordUsage(state.usage, key, e.model, result?.usage)
@@ -162,18 +173,47 @@ type StepEvent = ShadowStepEvent & { turnId: string; index: number; effort?: str
 
 // What a routed step needs from `$` and `next`; tests pass stand-ins (the
 // test kit refuses `$.http.fetch` from a test's own hooks). `history` reads
-// the loop's conversation from the session (see thread.ts Recovery).
-export type StepIO = { fetch: Fetch; sleep: Sleep; signal: AbortSignal; timeoutMs?: number; history?: () => Promise<any[] | undefined> }
+// the loop's conversation from the session (see thread.ts Recovery);
+// `agents` the session's agents, to tell a fork from a subagent.
+export type StepIO = {
+  fetch: Fetch
+  sleep: Sleep
+  signal: AbortSignal
+  timeoutMs?: number
+  history?: () => Promise<any[] | undefined>
+  agents?: () => Promise<AgentRef[] | undefined>
+}
+
+// What forkedLoop reads of a `$.agent.list()` entry.
+export type AgentRef = { id: string; type?: string; parentId?: string }
 
 // The step ended by Esc: no chunks, no error text, no response.
 function cancelled(e: { turnId: string; index: number }) {
   return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
 }
 
+// The loop a never-seen loop forks, by `$.agent.list()`: an id the list does
+// not name is an engine fork (compaction, memory) of the main loop; a listed
+// `fork` forks its parent. Any other listed agent is a real subagent with its
+// own system prompt and tools, and so is every id when the list cannot be
+// read: undefined, no fork.
+async function forkedLoop(agentId: string, io: StepIO): Promise<string | undefined> {
+  let agents: AgentRef[] | undefined
+  try {
+    agents = await io.agents?.()
+  } catch {
+    agents = undefined
+  }
+  if (!Array.isArray(agents)) return undefined
+  const self = agents.find(a => a?.id === agentId)
+  if (!self) return loopKeyOf(undefined)
+  return self.type === 'fork' ? loopKeyOf(self.parentId) : undefined
+}
+
 // For a continue the loop holds no conversation for: the session history and,
-// for a loop never seen (an engine fork of the main loop), the main loop's
-// system prompt and tools.
-async function recoveryFor(body: any, key: string, threads: Threads, io: StepIO): Promise<Recovery> {
+// for a fork the router has no state for, the forked loop's state.
+async function recoveryFor(body: any, agentId: string | undefined, threads: Threads, io: StepIO): Promise<Recovery> {
+  const key = loopKeyOf(agentId)
   if (body?.thread?.type !== 'continue' || threads.get(key)?.base) return {}
   let history: any[] | undefined
   try {
@@ -181,8 +221,9 @@ async function recoveryFor(body: any, key: string, threads: Threads, io: StepIO)
   } catch {
     history = undefined
   }
-  const main = loopKeyOf(undefined)
-  return { history, fallback: key === main ? undefined : threads.get(main) }
+  if (!agentId || threads.has(key)) return { history }
+  const forked = await forkedLoop(agentId, io)
+  return { history, fallback: forked === undefined ? undefined : threads.get(forked) }
 }
 
 // A routed step: shadow capture, provider request, reply. The engine's own
@@ -231,11 +272,11 @@ export async function* routedStep<E extends StepEvent>(
     return yield* early(`shadow request failed: ${String(err)}`)
   }
   // Message threads: rebuild a continue into the full conversation.
-  const resolved = resolveThread(body, threads.get(key), await recoveryFor(body, key, threads, io))
+  const resolved = resolveThread(body, threads.get(key), await recoveryFor(body, e.agentId, threads, io))
   if (!resolved.ok) return yield* early(resolved.message)
   const request = buildRequest(normalizeBody(resolved.body), route.model, maxOutputTokens(e.model))
   const fail = (err: ReturnType<typeof localError>) => {
-    recordStep(threads, key, resolved.body, [{ type: 'text', text: err.text }])
+    recordStep(threads, key, resolved.body, [{ type: 'text', text: err.text }], resolved.anchors)
     return errorChunks(e, err)
   }
   const out = await raceCall(io.sleep, io.signal, () => send(request), io.timeoutMs)
@@ -249,7 +290,7 @@ export async function* routedStep<E extends StepEvent>(
       return yield* fail(localError(name, `request failed: ${String(out.error)}`, secrets))
     case 'done':
       if (!out.value.ok) return yield* fail(withContextHint(out.value.error, e.agentId))
-      recordStep(threads, key, resolved.body, out.value.reply.content)
+      recordStep(threads, key, resolved.body, out.value.reply.content, resolved.anchors)
       yield* toChunks(out.value.reply)
       return toResult(e, out.value.reply)
   }

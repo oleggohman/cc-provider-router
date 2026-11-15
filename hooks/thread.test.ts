@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { cfg, drain, sleeper, provider, ZERO } from '../tests/harness.ts'
-import { routedStep } from './register.ts'
+import { routedStep, type AgentRef } from './register.ts'
 import { resetShadow, shadowFetch } from './shadow.ts'
 import { dropBase, normalizeBody, resolveThread, type ThreadState } from './thread.ts'
 
@@ -102,9 +102,27 @@ describe('resolveThread', () => {
     // A loop never seen (an engine fork): system/tools from the fallback loop.
     const fork = resolveThread(continueBody, undefined, { history, fallback: { system: SYS, tools: [BASH], base: [] } })
     expect(fork.ok && fork.body.system).toEqual(SYS)
-    // History without any assistant turn: the delta alone.
-    const fresh = resolveThread(continueBody, undefined, { history: [createBody.messages[0]], fallback: { system: SYS, tools: [BASH], base: [] } })
-    expect(fresh.ok && fresh.body.messages).toEqual(continueBody.messages)
+  })
+
+  test('history without any assistant turn is not the thread: the clear error, never the delta alone', () => {
+    const history = [createBody.messages[0]]
+    for (const r of [
+      resolveThread(continueBody, { system: SYS, tools: [BASH], base: undefined }, { history }),
+      resolveThread(continueBody, undefined, { history, fallback: { system: SYS, tools: [BASH], base: undefined } }),
+      resolveThread(continueBody, undefined, { history, fallback: { system: SYS, tools: [BASH], base: [createBody.messages[0]] } }),
+    ]) {
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.message).toContain('/clear')
+    }
+  })
+
+  test('a fork whose own history gives no conversation builds on the main loop conversation', () => {
+    const mainBase = [createBody.messages[0], { role: 'assistant', content: REPLY }]
+    for (const history of [[createBody.messages[0]], undefined]) {
+      const r = resolveThread(continueBody, undefined, { history, fallback: { system: SYS, tools: [BASH], base: mainBase } })
+      expect(r.ok).toBe(true)
+      if (r.ok) expect(r.body.messages).toEqual([...mainBase, ...continueBody.messages])
+    }
   })
 
   test('no conversation and no way to rebuild it (no history, or no system prompt known): the clear error', () => {
@@ -119,10 +137,49 @@ describe('resolveThread', () => {
     }
   })
 
-  test('dropBase forgets the conversation and keeps the system prompt and tools', () => {
-    const threads = new Map<string, ThreadState>([['ag-1', { system: SYS, tools: [BASH], base: [createBody.messages[0]] }]])
+  test('anchors: a new previous_message_id is bound to the conversation it continues', () => {
+    const base = [createBody.messages[0], { role: 'assistant', content: REPLY }]
+    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.anchors).toEqual({ msg_hook_1: 2 })
+  })
+
+  test('anchors: a continue from an earlier known anchor (a rewind) drops the turns after it', () => {
+    const u = (t: string) => ({ role: 'user', content: [{ type: 'text', text: t }] })
+    const a = (t: string) => ({ role: 'assistant', content: [{ type: 'text', text: t }] })
+    const base = [u('one'), a('ONE'), u('two'), a('TWO'), u('three'), a('THREE')]
+    const state = { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 2, msg_hook_2: 4 } }
+    const r = resolveThread(continueBody, state)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.body.messages).toEqual([u('one'), a('ONE'), ...continueBody.messages])
+    expect(r.anchors).toEqual({ msg_hook_1: 2 })
+    expect(state.base.length).toBe(6)
+  })
+
+  test('anchors: the anchor of the newest recorded turn changes nothing', () => {
+    const base = [createBody.messages[0], { role: 'assistant', content: REPLY }]
+    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 2 } })
+    expect(r.ok && r.body.messages).toEqual([...base, ...continueBody.messages])
+  })
+
+  test('anchors: an anchor past the known conversation is the clear error', () => {
+    const base = [createBody.messages[0], { role: 'assistant', content: REPLY }]
+    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 9 } })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.message).toContain('/clear')
+  })
+
+  test('anchors: a create starts with none', () => {
+    const r = resolveThread(createBody, { system: SYS, tools: [BASH], base: [], anchors: { msg_hook_1: 0 } })
+    expect(r.ok && r.anchors).toEqual({})
+  })
+
+  test('dropBase forgets the conversation and its anchors and keeps the system prompt and tools', () => {
+    const threads = new Map<string, ThreadState>([['ag-1', { system: SYS, tools: [BASH], base: [createBody.messages[0]], anchors: { msg_hook_1: 1 } }]])
     dropBase(threads, 'ag-1')
     expect(threads.get('ag-1')).toEqual({ system: SYS, tools: [BASH], base: undefined })
+    expect(threads.get('ag-1')!.anchors).toBe(undefined)
     dropBase(threads, 'nobody')
     expect(threads.has('nobody')).toBe(false)
   })
@@ -370,7 +427,8 @@ describe('routed steps across a thread', () => {
     // The engine's API-form history, with its first-party forms (normalized later).
     const history = [...createBody.messages, { role: 'assistant', content: REPLY }, ...continueBody.messages]
     const asked: string[] = []
-    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => (asked.push('h'), history) }
+    // An engine fork: an id $.agent.list() does not name.
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => (asked.push('h'), history), agents: async () => [{ id: 'ag-other', type: 'general-purpose' }] }
     const fork = await drain(routedStep(e(1, { agentId: 'fork-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     expect(fork.result.answer).toBe('SMOKE')
     expect(asked.length).toBe(1)
@@ -378,6 +436,95 @@ describe('routed steps across a thread', () => {
     expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
     expect(JSON.stringify(sent.system)).toContain('You are an agent.')
     expect(sent.tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+    expect(eng.network.length).toBe(0)
+  })
+
+  test('a fork whose history holds only its own prompt continues the main conversation', async () => {
+    resetShadow()
+    const eng = threadEngine([createBody, continueBody])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const threads = new Map<string, ThreadState>()
+    const signal = new AbortController().signal
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => [...continueBody.messages], agents: async () => [] }
+    const fork = await drain(routedStep(e(1, { agentId: 'fork-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(fork.result.answer).toBe('SMOKE')
+    const sent = JSON.parse(p.calls[1]!.init.body)
+    expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(sent.messages[1].content).toEqual(REPLY)
+  })
+
+  test('a listed fork (type fork) is rebuilt with its parent loop system prompt and tools', async () => {
+    const subCreate = { ...createBody, system: [BILLING, { type: 'text', text: 'You are a sub.' }], tools: [LATE] }
+    const history = [...createBody.messages, { role: 'assistant', content: REPLY }, ...continueBody.messages]
+    const cases = [
+      { listed: [{ id: 'fork-1', type: 'fork' }], system: 'You are an agent.', tools: ['Bash', 'mcp__x__late'] },
+      { listed: [{ id: 'ag-1', type: 'general-purpose' }, { id: 'fork-1', type: 'fork', parentId: 'ag-1' }], system: 'You are a sub.', tools: ['mcp__x__late'] },
+    ]
+    for (const c of cases) {
+      resetShadow()
+      const eng = threadEngine([createBody, subCreate, continueBody])
+      const p = provider([{ status: 200, text: toolReply }, { status: 200, text: toolReply }, { status: 200, text: textReply }])
+      const threads = new Map<string, ThreadState>()
+      const signal = new AbortController().signal
+      const plain = { fetch: p.fetch, sleep: sleeper().sleep, signal }
+      await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), plain, threads))
+      await drain(routedStep(e(0, { agentId: 'ag-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), plain, threads))
+      const io = { ...plain, history: async () => history, agents: async () => c.listed }
+      const fork = await drain(routedStep(e(1, { agentId: 'fork-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+      expect(fork.result.answer).toBe('SMOKE')
+      const sent = JSON.parse(p.calls[2]!.init.body)
+      expect(JSON.stringify(sent.system)).toContain(c.system)
+      expect(sent.tools.map((t: any) => t.name)).toEqual(c.tools)
+      expect(eng.network.length).toBe(0)
+    }
+  })
+
+  test('a real subagent the router never saw does not get the main system prompt or tools', async () => {
+    const history = [...createBody.messages, { role: 'assistant', content: REPLY }, ...continueBody.messages]
+    const listings: Array<(() => Promise<AgentRef[] | undefined>) | undefined> = [
+      async () => [{ id: 'ag-1', type: 'general-purpose' }], // listed: a subagent, not a fork
+      async () => undefined, // the list cannot be read
+      async () => {
+        throw new Error('refused')
+      },
+      undefined, // no list at all
+    ]
+    for (const agents of listings) {
+      resetShadow()
+      const eng = threadEngine([createBody, continueBody])
+      const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+      const threads = new Map<string, ThreadState>()
+      const signal = new AbortController().signal
+      await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+      const io = { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => history, agents }
+      const sub = await drain(routedStep(e(1, { agentId: 'ag-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+      expect(sub.result.answer).toContain('[provider-router]')
+      expect(sub.result.answer).toContain('/clear')
+      expect(p.calls.length).toBe(1)
+      expect(eng.network.length).toBe(0)
+    }
+  })
+
+  test('a continue from an earlier turn (rewind) does not resend the dropped turns', async () => {
+    resetShadow()
+    const u = (t: string) => [{ role: 'user', content: [{ type: 'text', text: t }] }]
+    const cont = (anchor: string, text: string) => ({ model: 'provider-router-shadow', thread: { type: 'continue', previous_message_id: anchor }, system: [BILLING], messages: u(text) })
+    const reply = (t: string) => ({ status: 200, text: JSON.stringify({ content: [{ type: 'text', text: t }], stop_reason: 'end_turn', usage: { input_tokens: 6, output_tokens: 1 } }) })
+    const eng = threadEngine([createBody, cont('msg_hook_a', 'TWO'), cont('msg_hook_b', 'THREE'), cont('msg_hook_a', 'REDO-TWO')])
+    const p = provider([reply('R1'), reply('R2'), reply('R3'), reply('R4')])
+    const threads = new Map<string, ThreadState>()
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
+    for (let i = 0; i < 4; i++) await drain(routedStep(e(i), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const third = JSON.stringify(JSON.parse(p.calls[2]!.init.body).messages)
+    expect(third).toContain('R2')
+    const rewound = JSON.parse(p.calls[3]!.init.body)
+    const text = JSON.stringify(rewound.messages)
+    expect(text).toContain('R1')
+    expect(text).toContain('REDO-TWO')
+    expect(text).not.toContain('"TWO"')
+    expect(text).not.toContain('R2')
+    expect(text).not.toContain('THREE')
     expect(eng.network.length).toBe(0)
   })
 

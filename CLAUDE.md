@@ -44,7 +44,11 @@ are in `README.md`; the engine behaviour the design depends on is in
   reached the provider and failed is recorded with its error text as the
   assistant turn; a cancelled step (Esc) records nothing; a step that failed
   before its request was captured drops the loop's conversation (`dropBase`),
-  to be rebuilt from `$.session.messages({ as: 'api' })`. Breaking these
+  to be rebuilt from `$.session.messages({ as: 'api' })`; a history with no
+  assistant turn is never used (the clear error, or for a fork the forked
+  loop's conversation); a loop with no state takes another loop's system
+  prompt and tools only when `$.agent.list()` shows it is a fork; every
+  recorded step keeps its `previous_message_id` anchors. Breaking these
   misaligns every later continue; any change needs `thread.test.ts` coverage.
 - The hooks module checker allows `$` only as `$.noun.call(...)` or passed to
   a top-level function of this module (not a closure).

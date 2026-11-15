@@ -292,10 +292,13 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
   that failed before its request was captured, Esc on a conversation's first
   routed step, an engine fork such as compaction, a subagent resumed after
   its turn ended, or a switch from a subscription model), it rebuilds it from
-  the session's own history. A `/config` change or a plugin reload clears the
-  system prompt and tools as well; then, or when the session cannot give the
-  history, the next routed step says so: run `/clear` or `/compact`, then
-  continue.
+  the session's own history. An engine fork such as compaction takes the
+  system prompt and tools of the conversation it forks; a subagent never
+  takes the main conversation's. A `/config` change or a plugin reload clears
+  the system prompt and tools as well; then, or when the session cannot give
+  the history, the next routed step says so: run `/clear` or `/compact`, then
+  continue (a subagent: start a new one). After a `/rewind`, a continue from
+  an earlier turn drops the turns after it.
 - **Errors** come back as the model's reply, prefixed `[provider-router]`,
   with stop reason `refusal` (Claude Code has no error stop reason), or
   `model_context_window_exceeded` for a context-length error. A parent agent
@@ -315,9 +318,10 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
 | OpenAI Platform (`openai:`) | unit-tested only; not live-verified at release |
 
 Not yet checked by hand in an interactive session: Esc during a routed step,
-automatic compaction of a routed main session, and rebuilding a routed
-conversation from the session history (after `/model` from a subscription
-model, a compaction fork, or a resumed subagent). Reports welcome.
+automatic compaction of a routed main session, `/rewind` in a routed
+session, and rebuilding a routed conversation from the session history
+(after `/model` from a subscription model, a compaction fork, or a resumed
+subagent). Reports welcome.
 
 ## Why not `ANTHROPIC_API_KEY`?
 

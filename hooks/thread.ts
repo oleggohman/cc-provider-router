@@ -18,16 +18,21 @@ const PLACEHOLDER_TOOL = 'DeferredToolPlaceholder'
 // turn the engine recorded (the anchor a continue builds on). `base` is
 // undefined once dropped (a step failed before its request was captured, or
 // a subagent's turn ended): system and tools stay, so the conversation can be
-// rebuilt from the session's history (see resolveThread).
-export type ThreadState = { system: unknown; tools: any[] | undefined; base: any[] | undefined }
+// rebuilt from the session's history (see resolveThread). `anchors` maps each
+// `previous_message_id` a continue named to the length of `base` it built on,
+// so a continue from an earlier turn (a rewind) drops the turns after it.
+export type ThreadState = { system: unknown; tools: any[] | undefined; base: any[] | undefined; anchors?: Anchors }
+
+export type Anchors = Record<string, number>
 
 // Thread state per loop key (`loopKeyOf` in shadow.ts).
 export type Threads = Map<string, ThreadState>
 
-// Forgets a loop's conversation, keeping its system prompt and tools.
+// Forgets a loop's conversation (and the anchors into it), keeping its system
+// prompt and tools.
 export function dropBase(threads: Threads, key: string): void {
   const s = threads.get(key)
-  if (s) threads.set(key, { ...s, base: undefined })
+  if (s) threads.set(key, { ...s, base: undefined, anchors: undefined })
 }
 
 function isBilling(b: any): boolean {
@@ -50,18 +55,21 @@ function hasRealTools(tools: unknown): tools is any[] {
   return Array.isArray(tools) && tools.some(t => t?.name !== PLACEHOLDER_TOOL)
 }
 
-// The history's messages up to and including its last assistant turn.
-function upToLastAssistant(history: any[]): any[] {
+// The history's messages up to and including its last assistant turn;
+// undefined when it has none: a continue always builds on an answered turn,
+// so such a history is not the thread's.
+function upToLastAssistant(history: any[] | undefined): any[] | undefined {
+  if (!history) return undefined
   for (let i = history.length - 1; i >= 0; i--) if (history[i]?.role === 'assistant') return history.slice(0, i + 1)
-  return []
+  return undefined
 }
 
-export type Resolved = { ok: true; body: any } | { ok: false; message: string }
+export type Resolved = { ok: true; body: any; anchors: Anchors } | { ok: false; message: string }
 
 // What a continue without a known conversation can be rebuilt from: the
-// session's Messages API history of the loop, and a state to take the system
-// prompt and tools from when the loop has none (an engine fork of the main
-// loop).
+// session's Messages API history of the loop, and, for a fork the router has
+// no state for, the forked loop's state: its system prompt and tools, and its
+// conversation when the fork's own history holds no assistant turn.
 export type Recovery = { history?: any[]; fallback?: ThreadState }
 
 const LOST =
@@ -69,25 +77,48 @@ const LOST =
 
 // The full request for this step: a create (or a body without `thread`) as
 // is; a continue rebuilt from the loop's state plus the new messages, or,
-// when the state holds no conversation, from the session history.
+// when the state holds no conversation, from the session history (for a fork
+// with no answered turn there, from the forked loop's conversation). The
+// continue's `previous_message_id` is bound to the conversation it builds on;
+// one bound earlier cuts the conversation back to that point. `anchors` are
+// the ones to record with the step.
 export function resolveThread(body: any, state: ThreadState | undefined, recovery: Recovery = {}): Resolved {
-  if (body?.thread?.type !== 'continue') return { ok: true, body }
+  if (body?.thread?.type !== 'continue') return { ok: true, body, anchors: {} }
   const known = state ?? recovery.fallback
   const system = systemIsEmpty(body.system) ? known?.system : body.system
   const tools = hasRealTools(body.tools) ? body.tools : (known?.tools ?? body.tools)
   let base = state?.base
-  if (!base && recovery.history && system !== undefined) base = upToLastAssistant(recovery.history)
+  let anchors: Anchors = base ? { ...state?.anchors } : {}
+  if (!base && system !== undefined) {
+    base = upToLastAssistant(recovery.history)
+    const parent = recovery.fallback
+    if (!base && !state && parent?.base && parent.base[parent.base.length - 1]?.role === 'assistant') {
+      base = parent.base
+      anchors = { ...parent.anchors }
+    }
+  }
   if (!base) return { ok: false, message: LOST }
+  const id = body.thread.previous_message_id
+  if (typeof id === 'string' && id) {
+    const at = anchors[id]
+    if (at === undefined) anchors[id] = base.length
+    else if (at > base.length) return { ok: false, message: LOST }
+    else if (at < base.length) {
+      base = base.slice(0, at)
+      anchors = Object.fromEntries(Object.entries(anchors).filter(([, n]) => n <= at))
+    }
+  }
   const delta = Array.isArray(body.messages) ? body.messages : []
-  return { ok: true, body: { ...body, system, tools, messages: [...base, ...delta] } }
+  return { ok: true, body: { ...body, system, tools, messages: [...base, ...delta] }, anchors }
 }
 
 // Records the step: the messages sent plus the assistant turn the engine now
-// holds (the reply, or the error text the step yielded).
-export function recordStep(threads: Threads, key: string, body: any, assistant: any[] | undefined): void {
+// holds (the reply, or the error text the step yielded), and the anchors
+// resolveThread bound.
+export function recordStep(threads: Threads, key: string, body: any, assistant: any[] | undefined, anchors: Anchors = {}): void {
   const messages = Array.isArray(body?.messages) ? body.messages : []
   const base = assistant && assistant.length ? [...messages, { role: 'assistant', content: assistant }] : [...messages]
-  threads.set(key, { system: body?.system, tools: Array.isArray(body?.tools) ? body.tools : undefined, base })
+  threads.set(key, { system: body?.system, tools: Array.isArray(body?.tools) ? body.tools : undefined, base, anchors })
 }
 
 // cache_control without `scope` (a first-party field).
