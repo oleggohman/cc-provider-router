@@ -10,6 +10,7 @@ import { buildRequest } from './request.ts'
 import { providersCommand } from './providers-command.ts'
 import { parseModel, type Route } from './route.ts'
 import { shadowFetch, shadowStats, shadowStep } from './shadow.ts'
+import { createThreads, loopKeyOf, normalizeBody, recordStep, resolveThread, type Threads } from './thread.ts'
 
 function label(r: Route): string {
   return r.provider === 'custom' ? `custom:${r.name}` : r.provider
@@ -23,6 +24,8 @@ export const register: Register = (on, options) => {
   let config: Promise<Config> | undefined
   // Last routed input size per loop, for compaction (see context.ts).
   const usage = createTracker()
+  // Each loop's conversation, for the engine's thread continues (see thread.ts).
+  const threads = createThreads()
 
   // Shadow capture: answers the engine's shadow requests locally and refuses
   // every request that could be one (see shadow.ts). Fail closed.
@@ -33,6 +36,7 @@ export const register: Register = (on, options) => {
     if (!route) {
       // Back on the subscription: the engine tracks this loop's context.
       usage.clear(e.agentId)
+      threads.delete(loopKeyOf(e.agentId))
       return yield* next(e)
     }
     const cfg = await (config ??= loadConfig($, options))
@@ -41,7 +45,7 @@ export const register: Register = (on, options) => {
       sleep: (ms, opts) => $.clock.sleep(ms, opts),
       signal: next.signal,
     }
-    return yield* trackUsage(usage, e, routedStep(e, next, route, cfg, io))
+    return yield* trackUsage(usage, e, routedStep(e, next, route, cfg, io, threads))
   })
 
   // Compaction for routed main-loop turns: scheduled after the turn has
@@ -97,6 +101,7 @@ export async function* routedStep<E extends StepEvent>(
   route: Route,
   cfg: Config,
   io?: StepIO,
+  threads: Threads = createThreads(),
 ): AsyncGenerator<any, any, unknown> {
   const secrets = [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)]
   const name = label(route)
@@ -119,18 +124,30 @@ export async function* routedStep<E extends StepEvent>(
   } catch (err) {
     return yield* errorChunks(e, localError(name, `shadow request failed: ${String(err)}`, secrets))
   }
-  const built = buildRequest(body, route, e)
+  // Message threads: rebuild a continue into the full conversation.
+  const key = loopKeyOf(e.agentId)
+  const resolved = resolveThread(body, threads.get(key))
+  if (!resolved.ok) return yield* errorChunks(e, localError(name, resolved.message, secrets))
+  const built = buildRequest(normalizeBody(resolved.body), route, e)
   if (!io) return yield* errorChunks(e, localError(name, 'no network access in this context', secrets))
+  // The engine records an error step's text as the assistant turn; keep the
+  // same in the loop's state so the next continue lines up.
+  const fail = (err: ReturnType<typeof localError>) => {
+    recordStep(threads, key, resolved.body, [{ type: 'text', text: err.text }])
+    return errorChunks(e, err)
+  }
   const out = await raceCall(io.sleep, io.signal, () => send(io, built), io.timeoutMs)
   switch (out.kind) {
     case 'cancelled':
+      // Nothing recorded: the next continue builds on the last recorded turn.
       return cancelled(e)
     case 'timeout':
-      return yield* errorChunks(e, localError(name, `no reply within ${out.ms} ms (timed out)`, secrets))
+      return yield* fail(localError(name, `no reply within ${out.ms} ms (timed out)`, secrets))
     case 'failed':
-      return yield* errorChunks(e, localError(name, `request failed: ${String(out.error)}`, secrets))
+      return yield* fail(localError(name, `request failed: ${String(out.error)}`, secrets))
     case 'done':
-      if (!out.value.ok) return yield* errorChunks(e, withContextHint(out.value.error, e.agentId))
+      if (!out.value.ok) return yield* fail(withContextHint(out.value.error, e.agentId))
+      recordStep(threads, key, resolved.body, out.value.reply.content)
       yield* toChunks(out.value.reply)
       return toResult(e, out.value.reply)
   }

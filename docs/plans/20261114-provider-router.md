@@ -205,16 +205,18 @@
 
 ### Task 8: Live smoke tests
 **Files:**
-- Create: `scripts/smoke.sh`, `examples/agents/gpt-worker.md`, `examples/agents/platform-opus.md`
+- Create: `scripts/smoke.sh`, `examples/agents/gpt-worker.md`, `examples/agents/platform-opus.md`, ➕ `examples/agents/glm-worker.md`, ➕ `hooks/thread.ts`, `hooks/thread.test.ts`
+- Modify: ➕ `hooks/register.ts`
 
-- [ ] write `scripts/smoke.sh`: per provider whose key is set, `claude -p --plugin-dir . --model <prefixed id>` with a tool-using prompt; assert reply and tool run
-- [ ] add example subagents using `model: openai:<id>` and `model: anthropic:<id>`
-- [ ] run smoke for Anthropic Platform, OpenAI Platform and Z.ai (`zai:glm-5.3`)
-- [ ] custom endpoint: start LiteLLM on a test Docker host, run smoke against it, then stop and remove the container
-- [ ] verify main session on Max and a subagent on another provider run in parallel in one session
-- [ ] ➕ zero-leak check in `scripts/smoke.sh`: after each run `shadowLeaks` is 0 and session usage / `/cost` shows no shadow-model or extra haiku entries; run for main routed, one routed subagent, and 2 routed subagents in parallel while main runs on Max
-- [ ] ➕ manual: transcript (`$.session.messages`) and `/cost` contain no stub text and no shadow-model entries
-- [ ] ➕ manual (from Task 1): Esc during a routed step ends it cleanly; interactive `/model <prefixed id>` accepted; `$.session.compact` from `turn.complete` works interactively
+- [x] write `scripts/smoke.sh`: per provider whose key is set, `claude -p --plugin-dir . --model <prefixed id>` with a tool-using prompt; assert reply and tool run (➕ cases `main`, `sub`, `parallel`, `background`; plugin options via `--settings` `pluginConfigs["provider-router@inline"]`; `SMOKE_ONLY`, `SMOKE_CASES`, `SMOKE_CUSTOM_URL/NAME/MODEL`)
+- [x] add example subagents using `model: openai:<id>` and `model: anthropic:<id>` (➕ plus `glm-worker` on `zai:glm-5.3`; smoke builds its subagents from these bodies)
+- [x] run smoke for Anthropic Platform, OpenAI Platform and Z.ai (`zai:glm-5.3`) — Z.ai: all cases pass. ⚠️ Anthropic: request reaches the API but the key's account has no credit (400 "credit balance is too low"); key and `/providers models` work — re-run `SMOKE_ONLY=anthropic` after topping up. OpenAI skipped: no key available.
+- [x] custom endpoint: start LiteLLM on a test Docker host, run smoke against it, then stop and remove the container — ➕ done twice: (1) Z.ai's OpenAI-compatible API directly as `custom:zaioa:glm-5.3` (`https://api.z.ai/api/paas/v4`), all cases pass; (2) LiteLLM `v1.106.6` on the lab Docker host with a master key (keyed path via `ROUTER_CUSTOM_API_KEYS`), alias `smoke-glm` → Z.ai OpenAI-compatible; `/providers models` lists `custom:litellm:smoke-glm` (401 without key); all cases pass; container and image removed
+- [x] verify main session on Max and a subagent on another provider run in parallel in one session (`background` case: main's own Bash runs while the routed subagent is still working)
+- [x] ➕ zero-leak check in `scripts/smoke.sh`: after each run `shadowLeaks` is 0 and session usage / `/cost` shows no shadow-model or extra haiku entries; run for main routed, one routed subagent, and 2 routed subagents in parallel while main runs on Max — ⚠️ `modelUsage` always lists `provider-router-shadow` with 0 tokens / $0 (the engine accounts the stub); smoke asserts that entry is zero and no other model than the session's own appears
+- [ ] ➕ ⚠️ needs user, interactive: transcript (`$.session.messages`) and `/cost` contain no stub text and no shadow-model entries — transcript part automated (smoke scans the session JSONL: no shadow-model assistant entry, no refused-shadow text); interactive `/cost` left to the user
+- [ ] ➕ ⚠️ needs user, interactive (from Task 1): Esc during a routed step ends it cleanly; interactive `/model <prefixed id>` accepted; `$.session.compact` from `turn.complete` works interactively
+- [x] ➕ ⚠️ found live: Claude Code 2.1.323 sends shadow requests as message threads (`thread: create`, then `continue` with only new messages, no tools, system = billing header) and with `role: "system"` messages carrying `tool_addition` / `tool_removal` blocks and a `DeferredToolPlaceholder` tool; step 2 of every routed loop failed (Z.ai 400 "messages parameter is illegal", Anthropic "tool_addition blocks require anthropic-beta"). Fix `hooks/thread.ts`: per-loop conversation state, continue rebuilt as state + delta, body normalized to plain Messages API; error steps recorded as the assistant turn, cancelled steps not; continue without state → clear error. `shadow.ts` unchanged. Tests in `hooks/thread.test.ts`.
 
 ### Task 9: Verify acceptance criteria
 - [ ] all routes work (none / anthropic / openai / zai / custom); config is env-or-`/config` only, plus `customEndpoints`

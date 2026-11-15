@@ -1,0 +1,220 @@
+import { describe, expect, test } from 'claude-code/testing'
+import { cfg, drain, sleeper, provider, ZERO } from '../tests/harness.ts'
+import { routedStep } from './register.ts'
+import { resetShadow, shadowFetch } from './shadow.ts'
+import { createThreads, normalizeBody, resolveThread } from './thread.ts'
+
+// Engine request shapes seen live (Claude Code 2.1.323, message threads):
+// the first request of a loop is a `thread: create` with everything; later
+// ones are `thread: continue` with only the new messages, no tools, and a
+// system prompt reduced to the billing header. Deferred tools arrive as
+// `tool_addition` blocks in `role: "system"` messages.
+
+const BILLING = { type: 'text', text: 'x-anthropic-billing-header: cc_version=0.0.0; cch=abc' }
+const SYS = [BILLING, { type: 'text', text: 'You are an agent.', cache_control: { type: 'ephemeral', ttl: '1h', scope: 'global' } }]
+const BASH = { name: 'Bash', description: 'run', input_schema: { type: 'object' }, eager_input_streaming: true }
+const PLACEHOLDER = { name: 'DeferredToolPlaceholder', description: 'never call', input_schema: { type: 'object' }, defer_loading: true }
+const LATE = { name: 'mcp__x__late', description: 'late tool', input_schema: { type: 'object' }, eager_input_streaming: true }
+
+const createBody = {
+  model: 'provider-router-shadow',
+  thread: { type: 'create' },
+  system: SYS,
+  tools: [BASH, PLACEHOLDER],
+  messages: [
+    { role: 'user', content: [{ type: 'text', text: 'run echo' }] },
+    {
+      role: 'system',
+      content: [
+        { type: 'text', text: 'Deferred tools: mcp__x__late' },
+        { type: 'tool_addition', tool: { type: 'tool_definition', definition: LATE } },
+      ],
+    },
+  ],
+}
+
+const continueBody = {
+  model: 'provider-router-shadow',
+  thread: { type: 'continue', previous_message_id: 'msg_hook_1' },
+  system: [BILLING],
+  messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'OK', cache_control: { type: 'ephemeral', ttl: '1h' } }] }],
+}
+
+const REPLY = [{ type: 'tool_use', id: 'call_1', name: 'Bash', input: { command: 'echo' } }]
+
+describe('resolveThread', () => {
+  test('a create is used as is and needs no state', () => {
+    const r = resolveThread(createBody, undefined)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.body.messages).toEqual(createBody.messages)
+  })
+
+  test('a body without a thread field is used as is', () => {
+    const { thread: _, ...plain } = createBody
+    const r = resolveThread(plain, undefined)
+    expect(r.ok).toBe(true)
+  })
+
+  test('a continue rebuilds the conversation from the loop state', () => {
+    const state = { system: SYS, tools: [BASH, PLACEHOLDER], base: [...createBody.messages, { role: 'assistant', content: REPLY }] }
+    const r = resolveThread(continueBody, state)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.body.messages).toEqual([...createBody.messages, { role: 'assistant', content: REPLY }, ...continueBody.messages])
+    expect(r.body.tools).toEqual([BASH, PLACEHOLDER])
+    expect(r.body.system).toEqual(SYS)
+  })
+
+  test('a continue that carries its own tools and full system keeps them', () => {
+    const state = { system: SYS, tools: [BASH], base: [] as any[] }
+    const own = { ...continueBody, system: [BILLING, { type: 'text', text: 'NEW SYSTEM' }], tools: [LATE] }
+    const r = resolveThread(own, state)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.body.tools).toEqual([LATE])
+    expect(JSON.stringify(r.body.system)).toContain('NEW SYSTEM')
+  })
+
+  test('a continue without state is a clear error, never a partial request', () => {
+    const r = resolveThread(continueBody, undefined)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.message).toContain('/clear')
+  })
+})
+
+describe('normalizeBody', () => {
+  test('drops the billing header block and cache_control scope', () => {
+    const n = normalizeBody(createBody)
+    const text = JSON.stringify(n.system)
+    expect(text).not.toContain('x-anthropic-billing-header')
+    expect(text).toContain('You are an agent.')
+    expect(text).not.toContain('scope')
+    expect(text).toContain('ephemeral')
+  })
+
+  test('system-role messages become user text; tool_addition definitions join tools', () => {
+    const n = normalizeBody(createBody)
+    expect(n.messages.every((m: any) => m.role === 'user' || m.role === 'assistant')).toBe(true)
+    expect(n.messages.length).toBe(1)
+    expect(JSON.stringify(n.messages)).toContain('Deferred tools: mcp__x__late')
+    expect(JSON.stringify(n.messages)).not.toContain('tool_addition')
+    expect(n.tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+  })
+
+  test('the placeholder tool and eager_input_streaming are dropped', () => {
+    const n = normalizeBody(createBody)
+    expect(n.tools.some((t: any) => t.name === 'DeferredToolPlaceholder')).toBe(false)
+    expect(n.tools.some((t: any) => 'eager_input_streaming' in t)).toBe(false)
+  })
+
+  test('tool_addition by reference loads a deferred tool; tool_removal drops one', () => {
+    const body = {
+      tools: [BASH, { ...LATE, defer_loading: true }, { name: 'Gone', input_schema: { type: 'object' } }],
+      messages: [
+        { role: 'user', content: 'hi' },
+        {
+          role: 'system',
+          content: [
+            { type: 'tool_addition', tool: { type: 'tool_reference', name: 'mcp__x__late' } },
+            { type: 'tool_removal', tool: { type: 'tool_reference', name: 'Gone' } },
+          ],
+        },
+      ],
+    }
+    const n = normalizeBody(body)
+    expect(n.tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+    expect('defer_loading' in n.tools[1]).toBe(false)
+    // A system message with no text leaves no message behind.
+    expect(n.messages).toEqual([{ role: 'user', content: 'hi' }])
+  })
+
+  test('merged user messages keep tool_result blocks first', () => {
+    const body = {
+      messages: [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: REPLY },
+        { role: 'system', content: [{ type: 'text', text: 'reminder' }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'OK' }] },
+      ],
+    }
+    const n = normalizeBody(body)
+    expect(n.messages.length).toBe(3)
+    expect(n.messages[2].role).toBe('user')
+    expect(n.messages[2].content[0].type).toBe('tool_result')
+    expect(n.messages[2].content[1]).toEqual({ type: 'text', text: 'reminder' })
+  })
+
+  test('a body without tools gets no tools field', () => {
+    const n = normalizeBody({ messages: [{ role: 'user', content: 'hi' }] })
+    expect('tools' in n).toBe(false)
+  })
+})
+
+// An engine stand-in that sends one given body per step through shadowFetch.
+function threadEngine(bodies: any[]) {
+  const network: any[] = []
+  let i = 0
+  const next = async function* (e: any): AsyncGenerator<any, any> {
+    const headers: Record<string, string> = { 'x-claude-code-session-id': 's1' }
+    if (e.agentId) headers['x-claude-code-agent-id'] = e.agentId
+    const body = { ...bodies[i++], model: e.model }
+    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, (x: any) => {
+      network.push(x)
+      return { value: { status: 200, ok: true, headers: {}, text: '' } }
+    })
+    yield { kind: 'stop', stopReason: 'end_turn', usage: ZERO }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [] }
+  }
+  return { network, next }
+}
+
+describe('routed steps across a thread', () => {
+  const route = { provider: 'zai', model: 'glm-5.3' } as const
+  const toolReply = JSON.stringify({ content: REPLY, stop_reason: 'tool_use', usage: { input_tokens: 5, output_tokens: 1 } })
+  const textReply = JSON.stringify({ content: [{ type: 'text', text: 'SMOKE' }], stop_reason: 'end_turn', usage: { input_tokens: 6, output_tokens: 1 } })
+  const e = (index: number, over: any = {}) => ({ turnId: 't1', index, model: 'zai:glm-5.3', messageCount: 10, ...over })
+
+  test('the second step sends the whole conversation, the tools and the system prompt', async () => {
+    resetShadow()
+    const eng = threadEngine([createBody, continueBody])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
+    const threads = createThreads()
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const second = await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(second.result.answer).toBe('SMOKE')
+    expect(eng.network.length).toBe(0)
+    const sent = JSON.parse(p.calls[1]!.init.body)
+    expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(sent.messages[1].content).toEqual(REPLY)
+    expect(sent.messages[2].content[0].type).toBe('tool_result')
+    expect(sent.tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+    expect(JSON.stringify(sent.system)).toContain('You are an agent.')
+    expect(JSON.stringify(sent)).not.toContain('x-anthropic-billing-header')
+    expect('thread' in sent).toBe(false)
+  })
+
+  test('threads are kept per loop: a subagent continue does not use main state', async () => {
+    resetShadow()
+    const eng = threadEngine([createBody, continueBody])
+    const p = provider([{ status: 200, text: toolReply }])
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
+    const threads = createThreads()
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const sub = await drain(routedStep(e(0, { agentId: 'ag-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(sub.result.answer).toContain('[provider-router]')
+    expect(p.calls.length).toBe(1)
+  })
+
+  test('a provider error is recorded as the assistant turn the engine keeps', async () => {
+    resetShadow()
+    const eng = threadEngine([createBody, continueBody])
+    const p = provider([{ status: 500, text: '{}' }, { status: 200, text: textReply }])
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
+    const threads = createThreads()
+    const first = await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const sent = JSON.parse(p.calls[1]!.init.body)
+    expect(sent.messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: first.result.answer }] })
+  })
+})
