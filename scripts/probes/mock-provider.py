@@ -35,12 +35,16 @@ GET <any path>: a one-line shell script that writes a file in <outside-dir>
 (the target of a "download and run" command in the classifier-denial probe).
 At most MOCK_TOOL_CAP (default 6) tool calls are emitted per minute.
 
-POST <path ending in /slow?s=<n>>: answers `{}` after n seconds.
+POST <path ending in /slow?s=<n>[&tag=<t>]>: answers `{"slow": n, "tag": t}`
+after n seconds; logs `slow_end` with `dropped: true` and answers nothing
+when the client closes the connection during the wait.
 Every request is logged as one JSON line (no header values).
 """
 import json
 import os
 import re
+import select
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -106,10 +110,32 @@ class H(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get('content-length', 0)) or 0)
         url = urlparse(self.path)
         if url.path.endswith('/slow'):
-            s = float(parse_qs(url.query).get('s', ['1'])[0])
-            log({'slow': s})
-            time.sleep(s)
-            return self._send(200, {})
+            q = parse_qs(url.query)
+            s = float(q.get('s', ['1'])[0])
+            tag = q.get('tag', [''])[0]
+            log({'slow': s, 'tag': tag})
+            # Wait, but watch the socket: the client closing it (EOF) is
+            # logged as a drop, which is how a killed curl child shows here.
+            t0 = time.time()
+            end = t0 + s
+            dropped = False
+            while time.time() < end:
+                ready, _, _ = select.select([self.connection], [], [], min(0.2, max(0.0, end - time.time())))
+                if not ready:
+                    continue
+                try:
+                    data = self.connection.recv(1, socket.MSG_PEEK)
+                except OSError:
+                    data = b''
+                if not data:
+                    dropped = True
+                    break
+                time.sleep(0.2)
+            log({'slow_end': s, 'tag': tag, 'dropped': dropped, 'after': round(time.time() - t0, 1)})
+            if dropped:
+                self.close_connection = True
+                return
+            return self._send(200, {'slow': s, 'tag': tag})
         try:
             body = json.loads(raw or b'{}')
         except Exception:

@@ -324,6 +324,37 @@ a hook above the router can write; `next.origin` proves who raised the
 request, not that it is unmodified. What a matching request can carry is
 bounded by its shape (a real first-party model, no tools, no thread).
 
+### Curl transport probe (plan Task 7, Claude Code 2.1.325, 2026-11-15)
+
+Run with `scripts/probes/curl-transport.sh` (README rows 28 to 31): the probe
+mod (from `make-probe.sh`), `--permission-mode default`, the `custom:mock:m`
+route only, the mock's `/slow?s=<n>&tag=<t>` endpoint, which now logs whether
+the client closed the connection during the wait. From the `http.fetch` hook,
+before the provider call, the probe runs `$.process.spawn({ argv: ["curl",
+"--disable", "--config", "-"], input: <config> })` with the URL, two headers,
+`data-binary`, `silent`, `show-error`, `globoff`, `proto`, `max-redirs`,
+`max-time` and a `write-out` status mark in the config on stdin. Hook order
+as in the spike (router copy above the observer).
+
+**Outcome: GO for `$.process.spawn`.** Every condition of the plan held.
+
+| # | Item | Run | Observed |
+|---|---|---|---|
+| 1 | 60 s hold completes | -p default, `hold60` | `hold-spawn-done` at 60047 ms, `{code: 0, signal: null}`; stdout came as two pieces, the body (`{"slow": 60.0, ...}`) then `\n@@probe-status@@200`; the mock: `dropped: false`, after 60.0 s; the step answered `MOCK-TEXT`. The config on stdin was read (URL, headers and body arrived) |
+| 2 | 300 s hold completes | -p default, `hold300` | `hold-spawn-done` at 300049 ms, `{code: 0, signal: null}`; mock `dropped: false` after 300.0 s; result `MOCK-TEXT` |
+| 3 | `return()` kills the child | -p default, `return`: `return()` from a `$.clock.sleep(20000)` while a pull is pending | the sleep fired at 20001 ms (not cut at 10 s while the spawn pull was pending); the pending pull settled `done: true` (value null) at 20003 ms and `return()` resolved `{done: true}` at the same ms; the mock logged `dropped: true` after 20.1 s. The handler then went on and the step answered `MOCK-TEXT` |
+| 4 | `next.signal` aborting kills the child | pty default, `esc`: Esc during the hold | `step-signal-abort` and `fetch-signal-abort` 1 ms apart, 8.7 s into the hold; the pending pull rejected `HooksError: provider-router: $.process.spawn(curl) aborted` 2 ms later; the mock logged `dropped: true` after 8.7 s; the step ended `stopReason: null`, the probe answered the stub |
+| 5 | the hook's budget is not consumed while it waits | rows 1 to 3 | `next.budget` `{ms: 10000, remainingMs: 9998}` at the start, 9997 after 60 s and after 300 s; no `fetch-catch`, the signal never aborted |
+
+Also seen: in the `esc` run the second prompt's hold was still waiting when
+the driver ended the session at 110 s; that child's pull settled `done` with
+`{code: null, signal: "SIGTERM"}` (no signal abort logged) and the mock logged a
+drop. Not observed: a module unload during a hold, and whether a spawn left
+running after the `http.fetch` hook returned is killed (the transport never
+leaves one: it ends the loop itself on timeout and overflow). Only the
+`stdout` pipe carried pieces in these runs; the stderr path is covered by the
+unit and integration tests only.
+
 ## Test-kit notes
 
 See "Test-kit quirks" in `CLAUDE.md`.

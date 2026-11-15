@@ -31,13 +31,14 @@ from `HEAD` and never committed as a plugin.
 |---|---|
 | `make-probe.sh <dir>` | generates the probe mod: `git archive HEAD` plus `probe-mod/probe.ts`, with `hooks/register.ts` rewired to it |
 | `probe-mod/probe.ts` | the probe's hooks: a rough answer in place that logs every request, chunk, result and signal it sees (`PROBE_LOG`) |
-| `mock-provider.py <port> <log> [<outside-dir>]` | OpenAI-compatible mock provider with scenarios (see its header) and a `/slow?s=<n>` endpoint |
+| `mock-provider.py <port> <log> [<outside-dir>]` | OpenAI-compatible mock provider with scenarios (see its header) and a `/slow?s=<n>[&tag=<t>]` endpoint that logs `slow_end` with `dropped: true` when the client closes the connection during the wait |
 | `mock-gateway.py <port> <log>` | Anthropic-Messages mock gateway (SSE), for runs with `ANTHROPIC_BASE_URL` and no mod |
 | `run-probe.sh <name>` | one headless run (`claude -p`) with the probe mod, the observer and the mock |
 | `drive-pty.py` | drives an interactive `claude` in a pty (keys at chosen seconds, Esc included) and prints the screen |
 | `run-pty.sh <name> <seconds> <step>...` | one interactive run through `drive-pty.py`, same plugins and files as `run-probe.sh` |
 | `make-abandoner.sh <dir>` | generates a mod whose `turn.step` hook above the router stops reading the stream |
 | `summary.sh <run-dir> [all]` | prints what a run recorded |
+| `curl-transport.sh [case...]` | the curl transport probe (plan Task 7): `hold60`, `hold300`, `return`, `esc` (rows 28 to 31) |
 | `check-predicate.py <probe.jsonl>...` | evaluates the proposed classifier predicate over every recorded request and over synthetic variants; exit 1 on a wrong match |
 | `../../tests/observer-plugin/` | the fetch observer, loaded beneath the router: what actually left it |
 
@@ -69,6 +70,8 @@ Do not edit the scripts while a long run is using them. A run writes
 | `PROBE_SLEEP_MS` | unset | a plain `$.clock.sleep` in the fetch hook before answering |
 | `PROBE_HOLD_URL`, `PROBE_HOLD_INIT` | unset; `[{}]` | nested `$.http.fetch` POSTs before the provider call, one per entry of the JSON array |
 | `PROBE_HOLD_RUN_URL` | unset | the same wait through `$.process.run(["curl", ...])` |
+| `PROBE_HOLD_SPAWN_URL` | unset | the same wait through `$.process.spawn` with argv `curl --disable --config -` and the config on stdin (the curl transport's shape); logs every piece, the exit and the signal |
+| `PROBE_SPAWN_RETURN_MS` | unset | with `PROBE_HOLD_SPAWN_URL`: call `return()` on the spawn stream after N ms (a `$.clock.sleep`), while a pull is pending |
 | `PROBE_ABANDON_AFTER` | unset | the step hook stops reading after N chunks and never returns |
 
 `run-probe.sh` adds `MODE`, `MODEL`, `PROMPT`, `PROMPT2`, `PROMPT3`,
@@ -108,6 +111,10 @@ stands for `PROMPT="scenario=agent go"`.
 | 25 | `run-pty.sh x 80 '22:text:scenario=agent go' 23:enter '50:text:scenario=bash go' 51:enter '66:text:/cost' 67:enter` | as probe 1 interactively, plus the session-title side request (`claude-haiku-5-5`, refused while a job is pending) and `/cost` listing `provider-router-shadow` |
 | 26 | `mock-gateway.py`, then `ANTHROPIC_BASE_URL=http://127.0.0.1:<port> ANTHROPIC_API_KEY=<any fake> claude -p --permission-mode auto --model claude-haiku-5-5 "go"` in a temp directory | the classifier requests in the gateway's log (model `claude-sonnet-5`, keys `max_tokens, messages, metadata, model, stop_sequences, system, thinking`); behind a gateway they carry no `auto-mode-classifier-*` beta. With `GW_FAIL_MODEL=haiku` and `--fallback-model claude-sonnet-5`: the conversation again under the other model |
 | 27 | `check-predicate.py "$PROBE_ROOT"/runs/*/probe.jsonl` | exit 0: only requests whose system prompt opens with the classifier's match, every variant fails |
+| 28 | `curl-transport.sh hold60` (`MODE=default`, `PROBE_HOLD_SPAWN_URL=.../slow?s=60&tag=hold60`, `S=text`) | `hold-spawn-done` after about 60 s with `{code: 0, signal: null}`; stdout pieces are the body then `\n@@probe-status@@200`; `next.budget.remainingMs` the same before and after (about 9997 of 10000); the mock logs `dropped: false`; result `MOCK-TEXT` |
+| 29 | `curl-transport.sh hold300` | the same after about 300 s |
+| 30 | `curl-transport.sh return` (`PROBE_SPAWN_RETURN_MS=20000`) | at 20 s (the sleep is not cut at 10 s) `return()` is called; the pending pull settles `done` (value null) within a few ms and `return()` resolves `{done: true}`; the mock logs `dropped: true` at about 20 s; the step goes on and answers `MOCK-TEXT` |
+| 31 | `curl-transport.sh esc` (pty, `PROBE_ESC=stub`, Esc during the hold) | `fetch-signal-abort` and `step-signal-abort` at the Esc; the pending pull rejects `HooksError: provider-router: $.process.spawn(curl) aborted`; the mock logs `dropped: true` at the same moment; the step ends `stopReason: null`. The second prompt holds again and is still waiting when the driver ends the session: that child's pull settles `done` with `{code: null, signal: "SIGTERM"}` and the mock logs a drop |
 
 Notes for the interactive runs: the trust dialog is answered at seconds 8 and
 9; prompt-submit hooks can delay a prompt by several seconds, so check

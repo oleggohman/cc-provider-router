@@ -38,6 +38,8 @@ type Knobs = {
   holdUrl?: string // a nested $.http.fetch POST before the provider call
   holdInit: any[]
   holdRunUrl?: string // the same wait through $.process.run(curl)
+  holdSpawnUrl?: string // the same wait through $.process.spawn(curl --disable --config -)
+  spawnReturnMs?: number // call return() on the spawn stream after N ms, while a pull is pending
   flow: string // inplace | around
   esc: string // what the fetch hook answers once its signal aborted: error | refuse | stub | wait (the provider's reply, when it comes)
   abandonAfter?: number // the step hook stops reading the stream after N chunks
@@ -61,6 +63,8 @@ async function knobs($: any): Promise<Knobs> {
     sleepMs: n(await $.env.get('PROBE_SLEEP_MS')),
     holdUrl: (await $.env.get('PROBE_HOLD_URL')) || undefined,
     holdRunUrl: (await $.env.get('PROBE_HOLD_RUN_URL')) || undefined,
+    holdSpawnUrl: (await $.env.get('PROBE_HOLD_SPAWN_URL')) || undefined,
+    spawnReturnMs: n(await $.env.get('PROBE_SPAWN_RETURN_MS')),
     holdInit: JSON.parse((await $.env.get('PROBE_HOLD_INIT')) || '[{}]'),
     flow: (await $.env.get('PROBE_FLOW')) || 'inplace',
     esc: (await $.env.get('PROBE_ESC')) || 'error',
@@ -349,6 +353,7 @@ async function answer($: any, k: Knobs, job: Job, body: any, next: any, n: numbe
         plog({ ev: 'hold-run-failed', seq: n, err: String(err), ms: Date.now() - h0 })
       }
     }
+    if (k.holdSpawnUrl) await holdSpawn($, k, next, n)
     const prep = await job.handler(body, fetch)
     if (!prep.ok) {
       plog({ ev: 'answer-outcome', seq: n, job: job.id, kind: 'unresolved', ms: Date.now() - t0 })
@@ -395,6 +400,75 @@ async function answer($: any, k: Knobs, job: Job, body: any, next: any, n: numbe
   } catch (err) {
     plog({ ev: 'answer-threw', seq: n, job: job.id, err: String(err), ms: Date.now() - t0 })
     return renderError(k, job, localError('probe', `internal error: ${String(err)}`))
+  } finally {
+    next.signal.removeEventListener('abort', onAbort)
+  }
+}
+
+// The wait of PROBE_HOLD_RUN_URL through `$.process.spawn`, the way the curl
+// transport starts curl: argv `curl --disable --config -`, the config on
+// stdin. Logs every piece, the result, and what happens to a pending pull when
+// return() is called (PROBE_SPAWN_RETURN_MS) or the hook's signal aborts.
+async function holdSpawn($: any, k: Knobs, next: any, n: number): Promise<void> {
+  const h0 = Date.now()
+  const ms = () => Date.now() - h0
+  const config = [
+    `url = "${k.holdSpawnUrl}"`,
+    'header = "content-type: application/json"',
+    'header = "x-probe: curl-transport"',
+    'data-binary = "{}"',
+    'silent',
+    'show-error',
+    'globoff',
+    'proto = "=https,http"',
+    'max-redirs = 0',
+    'max-time = 590',
+    'write-out = "\\n@@probe-status@@%{http_code}"',
+    '',
+  ].join('\n')
+  const onAbort = () => plog({ ev: 'hold-spawn-signal-abort', seq: n, ms: ms() })
+  next.signal.addEventListener('abort', onAbort, { once: true })
+  plog({ ev: 'hold-spawn-begin', seq: n, budget: next.budget, returnAfterMs: k.spawnReturnMs ?? null })
+  try {
+    const stream = $.process.spawn({ argv: ['curl', '--disable', '--config', '-'], input: config })
+    const it = typeof stream[Symbol.asyncIterator] === 'function' ? stream[Symbol.asyncIterator]() : stream
+    let returned: Promise<{ tag: string }> = new Promise(() => undefined)
+    if (k.spawnReturnMs !== undefined) {
+      returned = $.clock.sleep(k.spawnReturnMs).then(
+        async () => {
+          plog({ ev: 'hold-spawn-return-call', seq: n, ms: ms() })
+          try {
+            const r = await it.return?.()
+            plog({ ev: 'hold-spawn-return-settled', seq: n, ms: ms(), result: JSON.stringify(r ?? null).slice(0, 200) })
+          } catch (err) {
+            plog({ ev: 'hold-spawn-return-rejected', seq: n, ms: ms(), err: String(err) })
+          }
+          return { tag: 'returned' }
+        },
+        (err: unknown) => {
+          plog({ ev: 'hold-spawn-timer-rejected', seq: n, ms: ms(), err: String(err) })
+          return { tag: 'timer-failed' }
+        },
+      )
+    }
+    for (;;) {
+      const pull = it.next()
+      pull.then(
+        (r: any) => plog({ ev: 'hold-spawn-pull-settled', seq: n, ms: ms(), done: r?.done, value: JSON.stringify(r?.value ?? null).slice(0, 160) }),
+        (err: unknown) => plog({ ev: 'hold-spawn-pull-rejected', seq: n, ms: ms(), err: String(err) }),
+      )
+      const r: any = await Promise.race([pull, returned])
+      if (r && r.tag) {
+        plog({ ev: 'hold-spawn-left-after-return', seq: n, ms: ms(), how: r.tag })
+        return
+      }
+      if (r.done) {
+        plog({ ev: 'hold-spawn-done', seq: n, ms: ms(), result: r.value, budget: next.budget, aborted: next.signal.aborted })
+        return
+      }
+    }
+  } catch (err) {
+    plog({ ev: 'hold-spawn-failed', seq: n, ms: ms(), err: String(err), aborted: next.signal.aborted })
   } finally {
     next.signal.removeEventListener('abort', onAbort)
   }
