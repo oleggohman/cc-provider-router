@@ -313,6 +313,21 @@ a Claude ..." is sent as written.
   before sending) looks the same to the router and also turns routing off
   until then; in a session where every step is routed, that lasts until a
   restart.
+- **Auto mode cannot review a routed model's tool calls.** In auto mode
+  (`--permission-mode auto`, or Shift+Tab to it) Claude Code's classifier
+  decides each call that no rule settles, and its verdict comes back with
+  Anthropic's own reply to the step. A routed step is answered by another
+  provider, so there is no verdict and Claude Code refuses the call: `The
+  server-side auto mode classifier gave no verdict for <tool> ...`, shown as
+  `Not run · auto mode's check had no usable answer`. This affects a routed
+  main session and every routed subagent (which inherits the mode), and most
+  visibly `Agent`: a routed main session cannot start any subagent. Reads,
+  and edits and commands that accept-edits mode would allow, still run. The
+  plugin cannot supply the verdict and does not override the refusal, and an
+  allow rule does not help: auto mode ignores rules that would bypass its
+  classifier (`Agent`, `Agent(<type>)`). Use default or accept-edits mode for
+  sessions with routed models; there, permission prompts and allow rules
+  work as usual.
 - **Your subscription is never routed** and never pays for a routed call. The
   router does not use your Claude sign-in.
 - **History in memory.** Claude Code sends a conversation as a thread (after
@@ -373,6 +388,7 @@ models use it.
 | `unknown custom endpoint "x"` | the name in `custom:<name>:` must match a `customEndpoints` entry |
 | `the conversation so far is not known to the router` | the plugin reloaded mid-conversation (or the history could not be rebuilt): run `/clear` or `/compact` |
 | `routing is off: this plugin saw no engine request ...` | an organization-managed guard may hide Claude Code's requests from this plugin (see Limits); routing cannot work in that setup. If no guard is involved (another plugin answered a routed step), it turns back on after any step on a model without a router prefix, or restart Claude Code |
+| `The server-side auto mode classifier gave no verdict for Agent ...` / `Not run · auto mode's check had no usable answer` | auto mode cannot review a routed model's tool calls (see Limits): leave auto mode (Shift+Tab to default or accept-edits); an allow rule does not help in auto mode |
 | `malformed model id "..."` | a router prefix with nothing after it (`openai:`, `custom:gw`): use `<prefix>:<model>` or `custom:<name>:<model>` |
 | context-length error in a subagent | the task was too large for the model: lower `autoCompactWindow` or split the task |
 | anything else | `/providers` (status, warnings, counters), `/providers models` (calls each provider), `claude --debug` |

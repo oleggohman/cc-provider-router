@@ -173,6 +173,35 @@ live).
 | error stop reason | none exists | errors stop with `refusal`; context overflow with `model_context_window_exceeded` |
 | usage accounting | `modelUsage` (and `/cost`) always list `provider-router-shadow` with 0 tokens and $0 | expected; the smoke test asserts it stays zero |
 
+## Auto mode (checked live, Claude Code 2.1.325)
+
+In auto mode the engine puts every tool call no rule settles to a server-side
+classifier, whose verdict arrives with the first-party reply to the step. A
+routed step's first-party request is the shadow, answered locally, so no
+verdict exists and the engine fails closed (debug log: `Auto mode classifier
+unavailable, denying with retry guidance (fail closed)`).
+
+| Check (routed `anthropic:claude-haiku-5-5` main loop, `--permission-mode auto`) | Result |
+|---|---|
+| Bash `echo`, and a write inside the working directory | run; the log says `Skipping auto mode classifier for Bash: would be allowed in acceptEdits mode` |
+| `Agent` | refused: `The server-side auto mode classifier gave no verdict for Agent: the request that produced this action did not ask for one` |
+| core's `tool.check` verdict for that call | `ask` (`Claude requested permissions to use Agent, but you haven't granted it yet.`) |
+| a `tool.check` hook re-issuing that `ask` as its own, headless | `ask -> deny by plugin`, nobody to ask |
+| the same hook, interactive | no dialog; still `Not run · auto mode's check had no usable answer` (the classifier's block stands over a plugin's ask) |
+| `--allowedTools Agent`, and `--allowedTools "Agent(general-purpose)"` | still refused; the log says `Ignoring dangerous permission Agent(*) from cliArg (bypasses classifier)` |
+| routed main loop in accept-edits mode with `--allowedTools Agent` | the subagent runs; the classifier is never consulted |
+| subscription main loop in auto mode starting a routed subagent | the `Agent` call runs (the first-party reply carries a verdict); the subagent's own Bash call outside the working directory is refused with the same no-verdict text |
+| the same, the agent defined through `--agents` with `"permissionMode": "acceptEdits"` | no effect: the subagent's call is refused the same way |
+
+The smoke tests never met this: they run in the default mode with
+`--allowedTools Bash,Agent`.
+
+So the mod has no way to hand such a call to the person, and the person has
+none to allow it by rule; only leaving auto mode helps. The one thing a hook
+could do is answer `allow`, which would run a routed model's calls with no
+review at all while the session still says auto mode; the mod does not. The
+limit is documented in the README instead.
+
 ## Test-kit notes
 
 See "Test-kit quirks" in `CLAUDE.md`.
