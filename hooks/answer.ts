@@ -38,6 +38,7 @@ import { routeLabel, type Route } from './route.ts'
 import { SHADOW_MODEL, loopKeyOf, type Job } from './shadow.ts'
 import { answerableInPlace, mintId, stubSse, toSse } from './sse.ts'
 import { dropBase, normalizeBody, recordStep, resolveThread, type Anchors, type Recovery, type Threads } from './thread.ts'
+import { HostLimitError, hostLimitText } from './transport.ts'
 
 // What the handler staged for the step: the provider's reply (its real usage
 // included; the SSE carries zeros) with the message id minted for it, an
@@ -142,16 +143,13 @@ function hand(job: AnswerJob, text: string): string {
   return text
 }
 
-const HOST_LIMIT = 'no complete answer within 30000ms'
-
 // The text of a provider call that threw. On the `$.http.fetch` transport the
-// host ends a call after 30 s; that is said plainly.
+// host ends a call after 30 s; that is said plainly, also for a curl call
+// that fell back to `$.http.fetch` (transport.ts `fallbackFetch`).
 function failedText(error: unknown, transport: AnswerIO['transport']): string {
-  const text = String(error)
-  if (transport !== 'curl' && text.includes(HOST_LIMIT)) {
-    return 'request failed: the reply took longer than 30 s, the limit without curl (Claude Code ends a plugin fetch after 30 s; with curl available a reply may take up to 570 s)'
-  }
-  return `request failed: ${text}`
+  if (error instanceof HostLimitError) return `request failed: ${error.message}`
+  const limit = transport !== 'curl' ? hostLimitText(error) : undefined
+  return `request failed: ${limit ?? String(error)}`
 }
 
 async function recoveryOf(io: AnswerIO, body: any): Promise<Recovery> {

@@ -846,6 +846,53 @@ describe('jobs: the handler answers the captured shadow request', () => {
   })
 })
 
+describe('jobs: the fetch hook hands its own transport to the handler', () => {
+  const sideOf = () => ({ fetch: async () => ({ status: 200, ok: true, text: '' }), sleep: async () => undefined, signal: new AbortController().signal, transport: 'curl' as const })
+
+  test('the handler gets the side the fetch hook built, built only for the captured request', async () => {
+    resetShadow()
+    const net = network()
+    const side = sideOf()
+    let built = 0
+    const got: any[] = []
+    const job = beginShadow('main', { messageCount: 1, handler: async (_body, s) => (got.push(s), 'SSE') })
+    const factory = async () => (built++, side)
+    // An ordinary request and an inconsistent shadow request: the side is never built.
+    await shadowFetch(fetchEvent({ messages: 3 }), nextFrom(net, 'engine'), ON, factory)
+    expect(built).toBe(0)
+    const out: any = await shadowFetch(fetchEvent({ messages: 1 }), nextFrom(net, 'engine'), ON, factory)
+    expect(out.value.text).toBe('SSE')
+    expect(built).toBe(1)
+    expect(got).toEqual([side])
+    expect(net.calls.length).toBe(0)
+    endShadow('main', job.id)
+  })
+
+  test('a side factory that fails gives a local refusal, the handler not called, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    let calls = 0
+    const job = beginShadow('main', { messageCount: 1, handler: async () => (calls++, 'SSE') })
+    const out: any = await shadowFetch(fetchEvent({ messages: 1 }), nextFrom(net, 'engine'), ON, async () => {
+      throw new Error('cannot build the transport')
+    })
+    expect(out.value.status).toBe(400)
+    expect(calls).toBe(0)
+    expect(net.calls.length).toBe(0)
+    endShadow('main', job.id)
+  })
+
+  test('without a factory the handler gets no side (as before)', async () => {
+    resetShadow()
+    const net = network()
+    const got: any[] = []
+    const job = beginShadow('main', { messageCount: 1, handler: async (_b, s) => (got.push(s), 'SSE') })
+    await send(net, { messages: 1 })
+    expect(got).toEqual([undefined])
+    endShadow('main', job.id)
+  })
+})
+
 describe('through the plugin', () => {
   test('a routed step calls the engine with the shadow model and yields none of its chunks', async ($, on) => {
     on('clock.sleep', () => ({ value: undefined }) as any)

@@ -5,6 +5,7 @@ import { maxOutputTokens } from './limits.ts'
 import { buildRequest } from './request.ts'
 import { SHADOW_MODEL, beginShadow, endShadow, resetShadow } from './shadow.ts'
 import { stubSse } from './sse.ts'
+import { HostLimitError } from './transport.ts'
 import { normalizeBody, type ThreadState } from './thread.ts'
 import { cfg, provider, sleeper, tick } from '../tests/harness.ts'
 
@@ -206,6 +207,17 @@ describe('answerShadow: failures answer the empty stub and stage the error', () 
     const curl = await failing(provider([host]).fetch, { transport: 'curl' })
     expect(curl.text).not.toContain('the limit without curl')
     expect(curl.text).toContain('no complete answer within 30000ms')
+  })
+
+  test('a curl call that fell back to $.http.fetch and hit its 30 s limit gives the fallback sentence on the curl transport too', async () => {
+    const err = await failing(provider([new HostLimitError('the reply took longer than 30 s, the limit without curl (x)')]).fetch, { transport: 'curl' })
+    expect(err.text).toContain('request failed: the reply took longer than 30 s, the limit without curl')
+    expect(err.text).not.toContain('HostLimitError')
+  })
+
+  test('a curl transport error is shown with its text', async () => {
+    const err = await failing(provider([new Error('curl transport: reply too large (over 4 MiB)')]).fetch, { transport: 'curl' })
+    expect(err.text).toContain('request failed: Error: curl transport: reply too large')
   })
 
   test('an unreadable reply', async () => {

@@ -3,7 +3,7 @@
 // `routedStep`, one routed step from shadow capture to provider reply.
 
 import type { Register } from 'claude-code'
-import { raceCall, type AdapterResult, type Fetch, type Sleep } from './call.ts'
+import { DEFAULT_TIMEOUT_MS, raceCall, type AdapterResult, type Fetch, type FetchSide, type Sleep } from './call.ts'
 import { toChunks, toResult } from './chunks.ts'
 import { autoModeClassifierOf, loadConfig, missingKeyMessage, secretsOf, type Config } from './config.ts'
 import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
@@ -16,6 +16,7 @@ import { buildRequest, type ProviderRequest } from './request.ts'
 import { ID_FORMS, classifyModel, prefixOf, routeLabel, type ModelKind, type Route } from './route.ts'
 import { loopKeyOf, noteStep, shadowFetch, shadowFetchFailed, shadowStats, shadowStep, type ShadowOptions, type ShadowStepEvent } from './shadow.ts'
 import { dropBase, normalizeBody, recordStep, resolveThread, type Recovery, type Threads } from './thread.ts'
+import { checkCurl, curlFetch, fallbackFetch, selectTransport, type Spawn, type TransportCache, type TransportKind } from './transport.ts'
 
 // What the router keeps per loop between steps.
 export type LoopState = { usage: UsageMap; threads: Threads }
@@ -94,12 +95,36 @@ function cachedConfig($: any, options: Parameters<Register>[1], cache: ConfigCac
   return cache.config
 }
 
+// The provider transport this module load uses: curl when `curl --version`
+// runs (checked once, cached in `transport`), else `$.http.fetch`.
+async function transportOf($: any, transport: TransportCache, signal?: AbortSignal): Promise<TransportKind> {
+  const spawn: Spawn = req => $.process.spawn(req)
+  return selectTransport(transport, () => checkCurl(spawn, signal))
+}
+
+// What the `http.fetch` hook hands a captured shadow request's handler: the
+// provider transport built from that hook's own `$`, so a curl child dies
+// with that hook's dispatch (Esc, abandonment) or when the call's loop ends
+// (timeout, overflow; transport.ts). On curl a start failure falls back to
+// `$.http.fetch` (nothing was sent); any later failure is the call's error.
+export async function fetchSide($: any, signal: AbortSignal, transport: TransportCache, cache: ConfigCache, options: Parameters<Register>[1]): Promise<FetchSide> {
+  const sleep: Sleep = (ms, opts) => $.clock.sleep(ms, opts)
+  const httpFetch: Fetch = (url, init) => $.http.fetch(url, init)
+  const kind = await transportOf($, transport, signal)
+  if (kind === 'fetch') return { fetch: httpFetch, sleep, signal, transport: 'fetch' }
+  const secrets = secretsOf(await cachedConfig($, options, cache))
+  const spawn: Spawn = req => $.process.spawn(req)
+  const curl = curlFetch(spawn, { signal, timeoutMs: DEFAULT_TIMEOUT_MS, sleep, secrets })
+  return { fetch: fallbackFetch(curl, httpFetch, transport), sleep, signal, transport: 'curl' }
+}
+
 // Provider router: routes each model request by its model id's prefix.
 // Unprefixed models go to the engine untouched (the signed-in subscription).
 // Config comes from `options` (a /config change reloads this module) and env,
 // read on the first routed step; a failed read is retried on the next one.
 export const register: Register = (on, options) => {
   const cache: ConfigCache = {}
+  const transport: TransportCache = {}
   const state: LoopState = { usage: new Map(), threads: new Map() }
   // Read from the options alone (no env), so the fetch hook has it at once.
   const shadowOptions: ShadowOptions = { autoModeClassifier: autoModeClassifierOf(options) }
@@ -108,7 +133,8 @@ export const register: Register = (on, options) => {
   // every request that could be one, or that names a router-prefixed model;
   // lets the auto-mode classifier through per the option (see shadow.ts).
   // Fail closed: a guard that fails is otherwise skipped and the request goes on.
-  on('http.fetch', async (_$, e, next) => shadowFetch(e, next, shadowOptions) as any).catch((_$, e, next) => shadowFetchFailed(e, next, shadowOptions) as any)
+  // A captured request's handler gets this hook's provider transport.
+  on('http.fetch', async ($, e, next) => shadowFetch(e, next, shadowOptions, () => fetchSide($, next.signal, transport, cache, options)) as any).catch((_$, e, next) => shadowFetchFailed(e, next, shadowOptions) as any)
 
   on('turn.step', async function* ($, e, next) {
     const model = classifyModel(e.model)
@@ -186,7 +212,13 @@ export const register: Register = (on, options) => {
     try {
       const cfg = await cachedConfig($, options, cache)
       secrets = secretsOf(cfg)
-      const text = await providersCommand(e.args ?? '', cfg, (url, init) => $.http.fetch(url, init), shadowStats(), (ms, opts) => $.clock.sleep(ms, opts))
+      let kind: TransportKind | undefined
+      try {
+        kind = await transportOf($, transport)
+      } catch {
+        kind = undefined
+      }
+      const text = await providersCommand(e.args ?? '', cfg, (url, init) => $.http.fetch(url, init), shadowStats(), (ms, opts) => $.clock.sleep(ms, opts), kind)
       return { text }
     } catch (err) {
       return { text: sanitize(`${PREFIX} /providers failed: ${String(err)}`, secrets) }

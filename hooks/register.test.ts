@@ -1,7 +1,8 @@
 import { expect, test } from 'claude-code/testing'
-import { markStep, onSubagentTurnEnd, onUnprefixedStep } from './register.ts'
+import { fetchSide, markStep, onSubagentTurnEnd, onUnprefixedStep } from './register.ts'
 import { classifyModel } from './route.ts'
 import { resetShadow, sessionFlags } from './shadow.ts'
+import type { TransportCache } from './transport.ts'
 import { drain } from '../tests/harness.ts'
 
 test('unprefixed turn.step passes through to next unchanged', async ($, on) => {
@@ -137,4 +138,66 @@ test('the plugin loads with autoModeClassifier false and unprefixed steps still 
   const { result } = await drain($.turn.step({ turnId: 't1', index: 0, model: 'claude-haiku-4-5', messageCount: 1 }) as any)
   expect(seen.length).toBe(1)
   expect(result.answer).toBe('ENGINE')
+})
+
+// ---------------------------------------------------------------------------
+// Provider transport (transport.ts): built from the http.fetch hook's own `$`
+// for a captured shadow request's handler; shown by /providers.
+
+const FAKE = 'FAKEKEYregister01234567'
+
+function fake$(over: { spawn?: (req: any) => any; fetch?: (url: string, init: any) => Promise<any> } = {}) {
+  const spawned: any[] = []
+  const fetched: string[] = []
+  const versionOk = (req: any) => {
+    spawned.push(req)
+    const chunks = req.argv.includes('--version')
+      ? [{ stream: 'stdout', text: 'curl 8.7.1 (x) libcurl/8.7.1\n' }]
+      : [{ stream: 'stdout', text: '{"ok":1}\n@@provider-router-status@@200' }]
+    let i = 0
+    return { [Symbol.asyncIterator]: () => ({ next: async () => (i < chunks.length ? { done: false, value: chunks[i++] } : { done: true, value: { code: 0, signal: null } }) }) }
+  }
+  const $ = {
+    env: { get: async (n: string) => (n === 'OPENAI_API_KEY' ? FAKE : undefined) },
+    process: { spawn: over.spawn ?? versionOk },
+    clock: { sleep: () => new Promise<void>(() => undefined) },
+    http: {
+      fetch: over.fetch ?? (async (url: string) => (fetched.push(url), { status: 200, ok: true, headers: {}, text: '{}' })),
+    },
+  }
+  return { $, spawned, fetched }
+}
+
+test('fetchSide: curl when curl --version runs (checked once per load); calls go through curl with the key on stdin only', async () => {
+  const f = fake$()
+  const t: TransportCache = {}
+  const cache = {}
+  const side = await fetchSide(f.$, new AbortController().signal, t, cache, {})
+  expect(side.transport).toBe('curl')
+  const r = await side.fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${FAKE}` }, body: '{}' })
+  expect(r.status).toBe(200)
+  await fetchSide(f.$, new AbortController().signal, t, cache, {})
+  expect(f.spawned.filter(s => s.argv.includes('--version')).length).toBe(1)
+  const call = f.spawned.find(s => !s.argv.includes('--version'))
+  expect(call.argv).toEqual(['curl', '--disable', '--config', '-'])
+  expect(JSON.stringify([call.argv, call.env]).includes(FAKE)).toBe(false)
+  expect(f.fetched.length).toBe(0)
+})
+
+test('fetchSide: $.http.fetch when curl cannot be started', async () => {
+  const f = fake$({
+    spawn: () => {
+      throw new Error('spawn curl ENOENT')
+    },
+  })
+  const side = await fetchSide(f.$, new AbortController().signal, {}, {}, {})
+  expect(side.transport).toBe('fetch')
+  await side.fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: {}, body: '{}' })
+  expect(f.fetched).toEqual(['https://api.openai.com/v1/chat/completions'])
+})
+
+test('/providers names the transport; in the test kit (no process noun) it is fetch with its 30 s limit', async ($, on) => {
+  on('env.get', () => ({ value: undefined }) as any)
+  const r: any = await ($ as any).command.run({ command: 'providers', args: '' })
+  expect(r.text).toContain('transport: fetch (30 s limit)')
 })

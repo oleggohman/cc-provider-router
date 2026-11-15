@@ -39,7 +39,7 @@ patch(f"{out}/hooks/register.ts", [
      "  const state: LoopState = { usage: new Map(), threads: new Map() }\n"
      "  probeInit(options)\n"
      "  on('tool.check', async ($, e, next) => probeToolCheck($, e, next))\n"),
-    ("on('http.fetch', async (_$, e, next) => shadowFetch(e, next, shadowOptions) as any).catch((_$, e, next) => shadowFetchFailed(e, next, shadowOptions) as any)",
+    ("on('http.fetch', async ($, e, next) => shadowFetch(e, next, shadowOptions, () => fetchSide($, next.signal, transport, cache, options)) as any).catch((_$, e, next) => shadowFetchFailed(e, next, shadowOptions) as any)",
      "on('http.fetch', async ($, e, next) => probeFetch($, e, next) as any).catch(($, e, next) => probeFetchFailed($, e, next) as any)"),
     ("      onUnprefixedStep(state, e.agentId)\n",
      "      onUnprefixedStep(state, e.agentId)\n      await probeUnprefixed($, e)\n"),

@@ -355,6 +355,12 @@ leaves one: it ends the loop itself on timeout and overflow). Only the
 `stdout` pipe carried pieces in these runs; the stderr path is covered by the
 unit and integration tests only.
 
+The unit tests run in the kit, which has no process noun, so the real-curl
+checks (config parsing of injection payloads, the hostile `.curlrc`, argv as
+`ps` shows it, connection drop on Esc and timeout, overflow, a closed port)
+are in `scripts/curl-integration.mts`, run by `npm test` under Node against a
+listener on 127.0.0.1, skipped when `curl` is absent.
+
 ## Test-kit notes
 
 See "Test-kit quirks" in `CLAUDE.md`.

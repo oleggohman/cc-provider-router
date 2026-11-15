@@ -28,6 +28,11 @@ export type AdapterResult = { ok: true; reply: Reply } | { ok: false; error: Err
 
 export type Sleep = (ms: number, options?: { signal?: AbortSignal }) => Promise<void>
 
+// What the `http.fetch` hook hands a shadow job's handler: the provider
+// transport built from that hook's own `$` (a curl child it starts dies with
+// that hook's dispatch), its sleep and signal, and which transport it is.
+export type FetchSide = { fetch: Fetch; sleep: Sleep; signal: AbortSignal; transport: 'curl' | 'fetch' }
+
 export type Outcome<T> = { kind: 'done'; value: T } | { kind: 'timeout'; ms: number } | { kind: 'cancelled' } | { kind: 'failed'; error: unknown }
 
 export async function raceCall<T>(sleep: Sleep, signal: AbortSignal, work: () => Promise<T>, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<Outcome<T>> {

@@ -45,6 +45,7 @@
 // request without changing its origin. The `.catch` never evaluates it and
 // never grants the exception.
 
+import type { FetchSide } from './call.ts'
 import { classifyModel } from './route.ts'
 import { stubSse } from './sse.ts'
 
@@ -61,7 +62,8 @@ export type JobPhase =
 
 // Answers a captured shadow request with the reply as SSE text. A rejection
 // (or a throw) makes the request a local refusal, never a pass to the network.
-export type ShadowHandler = (body: any) => Promise<string>
+// `side`: the fetch hook's transport, when the hook passed a factory for it.
+export type ShadowHandler = (body: any, side?: FetchSide) => Promise<string>
 
 // One shadow step of one loop. `id` is unique per job: every async
 // continuation checks it before it acts on the loop's entry.
@@ -302,10 +304,10 @@ function countMatches(messages: unknown, expected: number): boolean {
 
 // The local answer to a captured shadow request: the handler's SSE, or the
 // empty stub when the job has no handler. A failing handler is refused.
-async function answer(job: Job, body: any): Promise<ShadowResponse> {
+async function answer(job: Job, body: any, side?: () => Promise<FetchSide>): Promise<ShadowResponse> {
   if (!job.handler) return stub()
   try {
-    return stub(await job.handler(body))
+    return stub(await job.handler(body, side ? await side() : undefined))
   } catch {
     return refuse()
   }
@@ -313,7 +315,9 @@ async function answer(job: Job, body: any): Promise<ShadowResponse> {
 
 // `http.fetch` hook. Returns the local answer, or calls `next` only for
 // requests that are clearly not shadows (rule order in the header).
-export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin, opts: ShadowOptions): Promise<R | { value: ShadowResponse }> {
+// `side`: builds the fetch hook's transport for a captured request's handler
+// (called only then; a failure refuses the request).
+export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin, opts: ShadowOptions, side?: () => Promise<FetchSide>): Promise<R | { value: ShadowResponse }> {
   noteOrigin(next)
   const body = parse(e.init?.body)
   if (!engineRequest(e, next)) {
@@ -332,7 +336,7 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) =
   if (p && body && body.model === SHADOW_MODEL && p.phase === 'registered' && countMatches(body.messages, p.messageCount)) {
     p.body = body
     p.phase = 'captured'
-    return { value: await answer(p, body) }
+    return { value: await answer(p, body, side) }
   }
   if (namesShadow(e, body)) return { value: refuse() }
   // 2. A router-prefixed id, or a body we cannot read while a job is pending.

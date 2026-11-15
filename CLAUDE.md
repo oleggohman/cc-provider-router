@@ -21,7 +21,9 @@ are in `README.md`; the engine behaviour the design depends on is in
   request building and the two adapters. `hooks/limits.ts`: per-model
   context windows and max output tokens (one prefix-matched table).
   `hooks/call.ts`: timeout/cancel of a provider call and the shared fetch and
-  adapter-result types. `hooks/chunks.ts`, `hooks/errors.ts`,
+  adapter-result types. `hooks/transport.ts`: provider calls through a `curl`
+  child (`$.process.spawn`, argv `curl --disable --config -`, key and body
+  on stdin only), with `$.http.fetch` as the fallback. `hooks/chunks.ts`, `hooks/errors.ts`,
   `hooks/context.ts`, `hooks/providers-command.ts`.
 - `tests/harness.ts`, `tests/fixtures/`: shared test stand-ins and transcripts.
 - `scripts/smoke.sh`: live smoke tests. `examples/agents/`: routed subagents.
@@ -91,6 +93,7 @@ Run sequentially, never in parallel (also `npm test`, `npm run typecheck`,
 
 ```bash
 claude plugin test .                                                       # unit tests
+node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/curl-integration.mts  # real-curl checks (npm test runs both)
 npm_config_cache="$TMPDIR/npm-cache" npx -y -p typescript@5.6.3 tsc -p .   # type check (exit 0)
 claude plugin validate .                                                   # manifest + hooks
 scripts/smoke.sh                                                           # live, costs money, needs keys

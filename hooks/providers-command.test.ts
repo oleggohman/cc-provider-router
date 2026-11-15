@@ -44,6 +44,13 @@ describe('statusText', () => {
     expect(statusText(cfg({}), STATS)).not.toContain('routing is off')
   })
 
+  test('the transport line: curl, or fetch with its 30 s limit; absent when unknown', () => {
+    expect(statusText(cfg({}), STATS, 'curl')).toContain('transport: curl')
+    expect(statusText(cfg({}), STATS, 'curl')).not.toContain('30 s limit')
+    expect(statusText(cfg({}), STATS, 'fetch')).toContain('transport: fetch (30 s limit)')
+    expect(statusText(cfg({}), STATS)).not.toContain('transport:')
+  })
+
   test('no custom endpoints: says so', () => {
     expect(statusText(cfg({}), STATS)).toContain('custom: none')
   })
@@ -66,6 +73,13 @@ describe('providersCommand', () => {
     const t = await providersCommand('', full(), p.fetch, STATS, sleeper().sleep)
     expect(p.calls.length).toBe(0)
     expect(t).toContain('shadowLeaks 0')
+  })
+
+  test('without args: the transport line is passed through', async () => {
+    const p = provider([{ status: 500, text: '' }])
+    expect(await providersCommand('', full(), p.fetch, STATS, sleeper().sleep, 'fetch')).toContain('transport: fetch (30 s limit)')
+    expect(await providersCommand('', full(), p.fetch, STATS, sleeper().sleep, 'curl')).toContain('transport: curl')
+    expect(p.calls.length).toBe(0)
   })
 
   test('unknown argument: usage line, no network', async () => {

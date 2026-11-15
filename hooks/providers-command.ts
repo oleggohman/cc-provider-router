@@ -9,6 +9,7 @@ import { localError, providerError, redact } from './errors.ts'
 import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, authHeader, type AnthropicRow } from './providers/anthropic.ts'
 import { OPENAI_BASE } from './providers/openai.ts'
 import { customLabel } from './route.ts'
+import { transportLine, type TransportKind } from './transport.ts'
 
 export type ListFetch = (url: string, init: { method: 'GET'; headers: Record<string, string> }) => Promise<FetchResponse>
 
@@ -47,7 +48,9 @@ function shownUrl(url: string): string {
   return url.replace(/^(https?:\/\/)[^/@\s]*@/, '$1')
 }
 
-export function statusText(cfg: Config, stats: ShadowCounters): string {
+// `transport`: the provider transport this module load uses (transport.ts),
+// when known.
+export function statusText(cfg: Config, stats: ShadowCounters, transport?: TransportKind): string {
   const list = rows(cfg)
   const width = Math.max(...list.map(r => r.label.length))
   const lines = ['provider-router']
@@ -56,6 +59,7 @@ export function statusText(cfg: Config, stats: ShadowCounters): string {
     lines.push(`  ${r.label.padEnd(width)}  ${shownUrl(r.baseUrl)}  key: ${key}`)
   }
   if (cfg.custom.size === 0) lines.push('  custom: none (add name=url to the /config field customEndpoints)')
+  if (transport) lines.push(transportLine(transport))
   lines.push(`shadow: shadowLeaks ${stats.shadowLeaks}, shadowRefused ${stats.shadowRefused}`)
   if (stats.blind) lines.push("routing is off: this plugin saw no engine request for a routed step (an organization guard may hide Claude Code's requests); it resumes once the plugin sees a Claude Code request, or restart Claude Code")
   for (const w of cfg.warnings) lines.push(`warning: ${w}`)
@@ -127,9 +131,9 @@ export async function listModels(fetch: ListFetch, cfg: Config, sleep: Sleep): P
   return parts.join('\n')
 }
 
-export async function providersCommand(args: string, cfg: Config, fetch: ListFetch, stats: ShadowCounters, sleep: Sleep): Promise<string> {
+export async function providersCommand(args: string, cfg: Config, fetch: ListFetch, stats: ShadowCounters, sleep: Sleep, transport?: TransportKind): Promise<string> {
   const a = args.trim().toLowerCase()
-  if (a === '') return statusText(cfg, stats)
-  if (a === 'models') return `${statusText(cfg, stats)}\n\n${await listModels(fetch, cfg, sleep)}`
+  if (a === '') return statusText(cfg, stats, transport)
+  if (a === 'models') return `${statusText(cfg, stats, transport)}\n\n${await listModels(fetch, cfg, sleep)}`
   return 'usage: /providers [models]'
 }

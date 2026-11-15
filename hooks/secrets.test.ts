@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
-import { loadConfig, missingKeyMessage } from './config.ts'
+import { providerSend } from './answer.ts'
+import { loadConfig, missingKeyMessage, secretsOf } from './config.ts'
 import { localError, providerError } from './errors.ts'
 import { listModels, providersCommand } from './providers-command.ts'
 import { routedStep } from './register.ts'
 import { resetShadow, shadowStats } from './shadow.ts'
+import { curlFetch, type Spawn, type SpawnChunk, type SpawnRequest } from './transport.ts'
 import { drain, engine, provider, sleeper, step } from '../tests/harness.ts'
 
 // Suite-wide secret check: drives every path that produces text the person,
@@ -115,6 +117,52 @@ describe('no key value in any output', () => {
     for (const status of [200, 401, 500]) outputs.push(await listModels(echoingProvider(status).fetch, c, sleeper().sleep))
     outputs.push(await listModels(provider([new Error(`refused ${ALL.join(',')}`)]).fetch, c, sleeper().sleep))
     assertClean('/providers', outputs)
+  })
+
+  test('curl transport: no key in argv or the child env, nor in error text, for every provider row', async () => {
+    const c = await loadConfig(env, OPTIONS)
+    const outputs: unknown[] = []
+    const requests: SpawnRequest[] = []
+    // Worst case: curl failing and repeating its whole config (the key in it) on stderr.
+    const spawn: Spawn = req => {
+      requests.push(req)
+      const chunks: SpawnChunk[] = [{ stream: 'stderr', text: `curl: (7) failed; config was: ${req.input}` }]
+      let i = 0
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: async () => (i < chunks.length ? { done: false, value: chunks[i++]! } : { done: true, value: { code: 7, signal: null } }),
+        }),
+      } as any
+    }
+    const keyed = { ...c, keys: { ...c.keys, anthropic: KEYS.anthropic, zai: KEYS.zai } }
+    for (const r of ROUTES) {
+      const fetch = curlFetch(spawn, { signal: new AbortController().signal, timeoutMs: 570_000, secrets: secretsOf(keyed) })
+      const target = providerSend(r.route as any, keyed, 'high', fetch)
+      expect(target.ok).toBe(true)
+      if (!target.ok) continue
+      try {
+        outputs.push(await target.send({ model: r.route.model, max_tokens: 10, system: 's', messages: [{ role: 'user', content: 'hi' }] }))
+      } catch (err) {
+        outputs.push(String(err), localError(r.model, `request failed: ${String(err)}`, secretsOf(keyed)))
+      }
+    }
+    expect(requests.length).toBe(ROUTES.length)
+    for (const req of requests) {
+      assertClean('argv and env', [req.argv, req.env ?? {}])
+      // The key did go to curl, on stdin.
+      expect(ALL.some(k => req.input?.includes(k))).toBe(true)
+    }
+    assertClean('curl errors', outputs)
+  })
+
+  test('/providers with either transport line', async () => {
+    const c = await loadConfig(env, OPTIONS)
+    const outputs: unknown[] = []
+    for (const kind of ['curl', 'fetch'] as const) {
+      outputs.push(await providersCommand('', c, echoingProvider(200).fetch, shadowStats(), sleeper().sleep, kind))
+      outputs.push(await providersCommand('models', c, echoingProvider(401).fetch, shadowStats(), sleeper().sleep, kind))
+    }
+    assertClean('/providers transport', outputs)
   })
 
   test('context hints and compaction', async () => {
