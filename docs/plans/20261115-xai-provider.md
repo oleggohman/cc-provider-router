@@ -94,8 +94,8 @@ One task, because adding `xai` to `SimpleProvider` makes `routedStep` hand xAI r
 
 ### Task 4: Verify
 
-- [ ] `npm test`, `npm run typecheck`, `npm run validate` - all pass
-- [ ] run `code-reviewer` on the branch, fix findings with `review-fixer`, re-review (max 3 rounds)
+- [x] `npm test`, `npm run typecheck`, `npm run validate` - all pass
+- [x] run `code-reviewer` on the branch, fix findings with `review-fixer`, re-review (max 3 rounds)
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
