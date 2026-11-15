@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
-import { SHADOW_MODEL, ShadowError, beginShadow, endShadow, isEngineRequest, resetShadow, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
+import { ID_FORMS, classifyModel } from './route.ts'
+import { SHADOW_MODEL, ShadowError, beginShadow, endShadow, isEngineRequest, noteStep, resetShadow, sessionFlags, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
 import { cfg, drain, sleeper, tick, ZERO } from '../tests/harness.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the engine
@@ -9,6 +10,10 @@ import { cfg, drain, sleeper, tick, ZERO } from '../tests/harness.ts'
 // asserts the network was called 0 times for shadow traffic.
 
 const URL = 'https://api.anthropic.com/v1/messages?beta=true'
+
+// The shipped default of the autoModeClassifier option, and the opt-out.
+const ON = { autoModeClassifier: true }
+const OFF = { autoModeClassifier: false }
 
 // `origin`: who raised the request (`next.origin.plugin`, set by the host);
 // "engine" by default for a request with engine markers, this mod otherwise.
@@ -49,7 +54,7 @@ function nextFrom(net: ReturnType<typeof network>, plugin: string) {
 }
 
 async function send(net: ReturnType<typeof network>, r: Req): Promise<any> {
-  const out: any = await shadowFetch(fetchEvent(r), nextFrom(net, r.origin ?? (r.engine === false ? 'provider-router' : 'engine')))
+  const out: any = await shadowFetch(fetchEvent(r), nextFrom(net, r.origin ?? (r.engine === false ? 'provider-router' : 'engine')), ON)
   return out.value
 }
 
@@ -328,7 +333,7 @@ describe('shadow fetch rules', () => {
     const net = network()
     const ev = fetchEvent({ model: 'claude-haiku-4-5' })
     ev.url = `https://bedrock.example/model/${SHADOW_MODEL}/invoke`
-    const out: any = await shadowFetch(ev, net.next)
+    const out: any = await shadowFetch(ev, net.next, ON)
     expect(out.value.status).toBe(400)
     expect(net.calls.length).toBe(0)
   })
@@ -349,7 +354,7 @@ describe('shadow fetch rules', () => {
     const captured = shadowStep(step({ agentId: 'a1' }), async function* (e: any) {
       const ev = fetchEvent({ messages: e.messageCount })
       ev.init.headers['X-Claude-Code-Agent-Id'] = 'a1'
-      const out: any = await shadowFetch(ev, net.next)
+      const out: any = await shadowFetch(ev, net.next, ON)
       expect(out.value.status).toBe(200)
       await gate
     })
@@ -374,7 +379,7 @@ describe('shadow fetch rules', () => {
     resetShadow()
     const net = network()
     const body = JSON.stringify({ model: 'glm-5.3', messages: [{ role: 'user', content: `grep ${SHADOW_MODEL} README.md` }] })
-    const out: any = await shadowFetch({ url: 'https://api.z.ai/api/anthropic/v1/messages', init: { method: 'POST', headers: {}, body } }, net.next)
+    const out: any = await shadowFetch({ url: 'https://api.z.ai/api/anthropic/v1/messages', init: { method: 'POST', headers: {}, body } }, net.next, ON)
     expect(out.value.text).toBe('{"network":true}')
     expect(net.calls.length).toBe(1)
     expect(shadowStats().shadowLeaks).toBe(0)
@@ -383,7 +388,7 @@ describe('shadow fetch rules', () => {
   test('a non-engine request: JSON naming the shadow model, unparseable text naming it, or unreadable bytes while pending, is refused', async () => {
     resetShadow()
     const net = network()
-    const plain = (body: unknown) => shadowFetch({ url: 'https://x.example/v1', init: { method: 'POST', headers: {}, body } }, net.next) as any
+    const plain = (body: unknown) => shadowFetch({ url: 'https://x.example/v1', init: { method: 'POST', headers: {}, body } }, net.next, ON) as any
     expect((await plain(JSON.stringify({ model: SHADOW_MODEL, messages: [] }))).value.status).toBe(400)
     expect((await plain(`model=${SHADOW_MODEL}&x`)).value.status).toBe(400)
     expect(shadowStats().shadowLeaks).toBe(2)
@@ -405,6 +410,7 @@ describe('shadow fetch rules', () => {
     const out: any = await shadowFetch(
       { url: 'https://api.openai.com/v1/chat/completions', init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"gpt-5"}' } },
       net.next,
+      ON,
     )
     expect(out.value.text).toBe('{"network":true}')
     expect(net.calls.length).toBe(1)
@@ -431,22 +437,22 @@ describe('http.fetch .catch (shadowFetch failed before deciding)', () => {
   test('already passed on by the hook: replayed, nothing new decided', async () => {
     resetShadow()
     const net = network()
-    const out: any = await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5' }), caught(net, true))
+    const out: any = await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5' }), caught(net, true), ON)
     expect(out.value.text).toBe('{"network":true}')
   })
 
   test('anything that could be a shadow is refused: a pending loop, the shadow model in body or URL', async () => {
     resetShadow()
     const net = network()
-    expect(((await shadowFetchFailed(fetchEvent({}), caught(net, false))) as any).value.status).toBe(400)
+    expect(((await shadowFetchFailed(fetchEvent({}), caught(net, false), ON)) as any).value.status).toBe(400)
     const ev = fetchEvent({ model: 'claude-haiku-4-5' })
     ev.url = `https://x.example/${SHADOW_MODEL}`
-    expect(((await shadowFetchFailed(ev, caught(net, false))) as any).value.status).toBe(400)
+    expect(((await shadowFetchFailed(ev, caught(net, false), ON)) as any).value.status).toBe(400)
     let open!: () => void
     const gate = new Promise<void>(r => (open = r))
     const running = shadowStep(step({ agentId: 'a1' }), engine(net, { gate }).next)
     await tick()
-    expect(((await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5', agent: 'zz' }), caught(net, false))) as any).value.status).toBe(400)
+    expect(((await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5', agent: 'zz' }), caught(net, false), ON)) as any).value.status).toBe(400)
     open()
     await running
     expect(net.calls.length).toBe(0)
@@ -455,7 +461,7 @@ describe('http.fetch .catch (shadowFetch failed before deciding)', () => {
   test('an ordinary request with nothing pending goes on', async () => {
     resetShadow()
     const net = network()
-    const out: any = await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5' }), caught(net, false))
+    const out: any = await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5' }), caught(net, false), ON)
     expect(out.value.text).toBe('{"network":true}')
     expect(net.calls.length).toBe(1)
   })
@@ -583,7 +589,7 @@ describe('blind capture: the http.fetch hook never sees the engine request', () 
     const net = network()
     await drain(routedStep(step(), blindEngine(net).next, ROUTE, CFG, counting().io, new Map()))
     expect(shadowStats().blind).toBe(true)
-    shadowFetchFailed(fetchEvent({ model: 'claude-sonnet-4-5' }), Object.assign(nextFrom(net, 'engine'), { called: false }))
+    shadowFetchFailed(fetchEvent({ model: 'claude-sonnet-4-5' }), Object.assign(nextFrom(net, 'engine'), { called: false }), ON)
     expect(shadowStats().blind).toBe(false)
   })
 
@@ -602,9 +608,9 @@ describe('blind capture: the http.fetch hook never sees the engine request', () 
     }
     const events = [forged(), forged(ev => delete ev.init.headers['x-claude-code-session-id']), forged(ev => delete ev.init.compress)]
     for (const ev of events) {
-      await shadowFetch(ev, nextFrom(net, 'other-plugin'))
-      shadowFetchFailed(ev, Object.assign(nextFrom(net, 'other-plugin'), { called: false }))
-      shadowFetchFailed(ev, Object.assign(nextFrom(net, 'other-plugin'), { called: true }))
+      await shadowFetch(ev, nextFrom(net, 'other-plugin'), ON)
+      shadowFetchFailed(ev, Object.assign(nextFrom(net, 'other-plugin'), { called: false }), ON)
+      shadowFetchFailed(ev, Object.assign(nextFrom(net, 'other-plugin'), { called: true }), ON)
     }
     expect(shadowStats().blind).toBe(true)
     let calls = 0
@@ -863,5 +869,544 @@ describe('through the plugin', () => {
     expect(net.length).toBe(0)
     expect(JSON.stringify(chunks)).not.toContain('ENGINE-STUB-CHUNK')
     expect(result.answer).toContain('[provider-router] openai error: shadow request failed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unconditional refusals (shadow model, prefixed model ids) and the auto-mode
+// classifier exception. Request shapes as recorded in docs/design-notes.md,
+// "Answer in place: spike" (Claude Code 2.1.325); header values that may hold
+// a credential are not recorded, so none appear here.
+
+const CLASSIFIER_BETA = 'claude-code-20250219,auto-mode-classifier-2026-07-16,claude-code-side-query-2026-09-29'
+
+// An engine request with `body` (an object, sent as JSON) and extra headers.
+function engineReq(body: unknown, over: { headers?: Record<string, string>; url?: string; method?: string; agent?: string } = {}): any {
+  const headers: Record<string, string> = { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', ...over.headers }
+  if (over.agent) headers['x-claude-code-agent-id'] = over.agent
+  return { url: over.url ?? URL, init: { method: over.method ?? 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) } }
+}
+
+const CLASSIFIER_SYSTEM = [{ type: 'text', text: 'You are a security monitor for autonomous AI coding agents.' }]
+const TRANSCRIPT = [{ role: 'user', content: '<transcript>user: run the tests\nBash: npm test</transcript>' }]
+
+// Stage 1: a short severity verdict.
+const STAGE1 = { max_tokens: 64, messages: TRANSCRIPT, metadata: { user_id: 'u' }, model: 'claude-sonnet-5', stop_sequences: ['</severity>'], system: CLASSIFIER_SYSTEM, thinking: { type: 'disabled' } }
+// Stage 2, after stage 1 flagged the call: no stop sequences, a long answer.
+const { stop_sequences: _s, ...STAGE2_BASE } = STAGE1
+const STAGE2 = { ...STAGE2_BASE, max_tokens: 8192 }
+const CLASSIFIER_HEADERS = { 'anthropic-beta': CLASSIFIER_BETA, 'x-stainless-timeout': '60' }
+
+const classifier = (body: unknown = STAGE1, over: { headers?: Record<string, string>; url?: string; method?: string; agent?: string } = {}) =>
+  engineReq(body, { ...over, headers: { ...CLASSIFIER_HEADERS, ...over.headers } })
+
+// A conversation request (thread create) as the engine sends it.
+const CONVERSATION = {
+  context_management: {},
+  diagnostics: {},
+  max_tokens: 32000,
+  messages: [{ role: 'user', content: 'hi' }],
+  metadata: { user_id: 'u' },
+  model: 'claude-sonnet-5',
+  output_config: {},
+  stream: true,
+  system: [{ type: 'text', text: 'SYS' }],
+  thinking: { type: 'adaptive' },
+  thread: { type: 'create' },
+  tools: [{ name: 'Read', description: 'd', input_schema: { type: 'object' } }],
+}
+const { thread: _t, ...CONVERSATION_NO_THREAD } = CONVERSATION
+
+// Sends `ev` through shadowFetch with the host-set origin `plugin`.
+async function fetchVia(net: ReturnType<typeof network>, ev: any, opts = ON, plugin = 'engine'): Promise<any> {
+  const out: any = await shadowFetch(ev, nextFrom(net, plugin), opts)
+  return out.value
+}
+
+const passed = (r: any) => r.text === '{"network":true}'
+const refused = (r: any) => r.status === 400 && r.headers['x-should-retry'] === 'false'
+
+// Runs `body` with a job pending on `loops` (none by default), then ends them.
+async function withJobs<T>(loops: string[], body: () => Promise<T>): Promise<T> {
+  const jobs = loops.map(k => [k, beginShadow(k, { messageCount: 1 })] as const)
+  try {
+    return await body()
+  } finally {
+    for (const [k, j] of jobs) endShadow(k, j.id)
+  }
+}
+
+describe('unconditional refusal: router-prefixed model ids never reach the first-party host', () => {
+  const PREFIXED = ['custom:x:y', 'anthropic:claude-fable-5-2', 'zai:glm-5.3', 'openai:gpt-5']
+  const MALFORMED = ['openai:', 'custom:gw', 'custom:gw:', 'zai:', 'anthropic:']
+
+  for (const jobs of [[], ['main'], ['a1']]) {
+    const label = jobs.length ? `with a job pending on ${jobs[0]}` : 'with no job pending'
+
+    test(`an engine request naming a prefixed model is refused, ${label}, zero network calls`, async () => {
+      resetShadow()
+      const net = network()
+      await withJobs(jobs, async () => {
+        for (const model of PREFIXED) {
+          expect(refused(await fetchVia(net, engineReq({ ...CONVERSATION, model })))).toBe(true)
+          // Also under the classifier's own shape and marker (its retry).
+          expect(refused(await fetchVia(net, classifier({ ...STAGE1, model })))).toBe(true)
+        }
+      })
+      expect(net.calls.length).toBe(0)
+    })
+
+    test(`a malformed prefix is refused, ${label}, zero network calls`, async () => {
+      resetShadow()
+      const net = network()
+      await withJobs(jobs, async () => {
+        for (const model of MALFORMED) {
+          expect(refused(await fetchVia(net, engineReq({ ...CONVERSATION, model })))).toBe(true)
+          expect(refused(await fetchVia(net, classifier({ ...STAGE1, model })))).toBe(true)
+        }
+      })
+      expect(net.calls.length).toBe(0)
+    })
+
+    test(`a prefixed id in the URL is refused, ${label}, zero network calls`, async () => {
+      resetShadow()
+      const net = network()
+      await withJobs(jobs, async () => {
+        for (const url of [
+          'https://bedrock.example/model/openai:gpt-5/invoke',
+          'https://bedrock.example/model/custom%3Agw%3Am/invoke',
+          'https://api.anthropic.com/v1/messages?beta=true&model=zai:glm-5.3',
+          'https://gw.example/v1/anthropic:claude-x/messages',
+        ]) {
+          expect(refused(await fetchVia(net, engineReq({ ...CONVERSATION }, { url })))).toBe(true)
+          expect(refused(await fetchVia(net, classifier(STAGE1, { url })))).toBe(true)
+        }
+      })
+      expect(net.calls.length).toBe(0)
+    })
+
+    test(`an unparseable string body naming a prefixed model is refused, ${label}, zero network calls`, async () => {
+      resetShadow()
+      const net = network()
+      await withJobs(jobs, async () => {
+        expect(refused(await fetchVia(net, engineReq('{"model":"custom:gw:m", broken')))).toBe(true)
+        expect(refused(await fetchVia(net, engineReq('{"model" : "openai:", broken')))).toBe(true)
+      })
+      expect(net.calls.length).toBe(0)
+    })
+  }
+
+  test('an unreadable or unparseable engine body is refused while any job is pending, whatever its loop', async () => {
+    resetShadow()
+    const net = network()
+    await withJobs(['a1'], async () => {
+      expect(refused(await fetchVia(net, { url: URL, init: { method: 'POST', headers: { 'x-claude-code-session-id': 's' }, body: { bytes: 'AAAA' } } }))).toBe(true)
+      expect(refused(await fetchVia(net, engineReq('not json at all')))).toBe(true)
+      expect(refused(await fetchVia(net, classifier('not json at all')))).toBe(true)
+    })
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('the hosts and host names of URLs are not read as prefixes; unprefixed models with a colon pass', async () => {
+    resetShadow()
+    const net = network()
+    // An ANTHROPIC_BASE_URL host that happens to be named like a provider.
+    expect(passed(await fetchVia(net, engineReq({ ...CONVERSATION }, { url: 'http://custom:8080/v1/messages' })))).toBe(true)
+    expect(passed(await fetchVia(net, engineReq({ ...CONVERSATION }, { url: 'https://api.openai.example/v1/messages' })))).toBe(true)
+    expect(passed(await fetchVia(net, engineReq({ ...CONVERSATION, model: 'claude-sonnet-5' })))).toBe(true)
+    expect(net.calls.length).toBe(3)
+  })
+
+  test("the mod's own provider request (no engine markers, not raised by the engine) keeps its own model, even one with a colon", async () => {
+    resetShadow()
+    const net = network()
+    // custom:gw:openai:gpt-5 sends model "openai:gpt-5" to the custom endpoint.
+    const own = { url: 'https://gw.example/v1/chat/completions', init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'openai:gpt-5', messages: [] }) } }
+    expect(passed(await fetchVia(net, own, ON, 'provider-router'))).toBe(true)
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('a request raised by the engine counts as an engine request even with its markers stripped', async () => {
+    resetShadow()
+    const net = network()
+    const stripped = { url: URL, init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...CONVERSATION, model: 'custom:x:y' }) } }
+    expect(refused(await fetchVia(net, stripped))).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+})
+
+describe('the engine sends prefixed requests of its own that bypass turn.step (Task 2): refused with no job pending', () => {
+  test('the classifier retry under the session model id (classifier keys, max_tokens 2112, no thinking)', async () => {
+    resetShadow()
+    const net = network()
+    const { thinking: _th, ...rest } = STAGE1
+    expect(refused(await fetchVia(net, classifier({ ...rest, model: 'custom:x:y', max_tokens: 2112 })))).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('the prompt suggestion (conversation keys under the session model id)', async () => {
+    resetShadow()
+    const net = network()
+    expect(refused(await fetchVia(net, engineReq({ ...CONVERSATION_NO_THREAD, model: 'custom:x:y' }, { headers: { 'anthropic-beta': 'claude-code-20250219' } })))).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test("the engine's own compaction request (fallbacks, compaction headers)", async () => {
+    resetShadow()
+    const net = network()
+    const compaction = { ...CONVERSATION_NO_THREAD, fallbacks: [{ model: 'claude-sonnet-5' }], model: 'custom:mock:m' }
+    expect(refused(await fetchVia(net, engineReq(compaction, { headers: { 'x-cc-compaction-request': 'true', 'x-claude-code-compaction': 'true' } })))).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+})
+
+describe('classifier exception: the predicate (pinned by Task 2)', () => {
+  test('stage 1 and stage 2 classifier requests reach next exactly once each, with no job pending', async () => {
+    resetShadow()
+    const net = network()
+    expect(passed(await fetchVia(net, classifier(STAGE1)))).toBe(true)
+    expect(passed(await fetchVia(net, classifier(STAGE2)))).toBe(true)
+    expect(net.calls.length).toBe(2)
+    expect(JSON.parse(net.calls[0].init.body).max_tokens).toBe(64)
+    expect(JSON.parse(net.calls[1].init.body).max_tokens).toBe(8192)
+  })
+
+  test('a classifier request passes with a job pending on the main loop (it carries no agent header)', async () => {
+    resetShadow()
+    const net = network()
+    await withJobs(['main'], async () => {
+      expect(passed(await fetchVia(net, classifier(STAGE1)))).toBe(true)
+    })
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('a classifier request passes with a job pending on a subagent loop', async () => {
+    resetShadow()
+    const net = network()
+    await withJobs(['a1'], async () => {
+      expect(passed(await fetchVia(net, classifier(STAGE2)))).toBe(true)
+    })
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('with autoModeClassifier false and a routed step seen, a classifier request is refused, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    noteStep(true)
+    expect(refused(await fetchVia(net, classifier(STAGE1), OFF))).toBe(true)
+    await withJobs(['main'], async () => {
+      expect(refused(await fetchVia(net, classifier(STAGE2), OFF))).toBe(true)
+    })
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('header names are matched in any case; the beta token may carry spaces around it', async () => {
+    resetShadow()
+    const net = network()
+    const ev = engineReq(STAGE1, { headers: { 'Anthropic-Beta': 'claude-code-20250219, auto-mode-classifier-2026-07-16 ,x' } })
+    expect(passed(await fetchVia(net, ev))).toBe(true)
+    expect(net.calls.length).toBe(1)
+  })
+})
+
+describe('classifier exception: negatives, each refused with zero network calls while a job is pending on the main loop', () => {
+  const cases: [string, () => any, string?][] = [
+    ['the marker with a shadow URL', () => classifier(STAGE1, { url: `${URL}&m=${SHADOW_MODEL}` })],
+    ['the marker with another host', () => classifier(STAGE1, { url: 'https://api.anthropic.com.example.org/v1/messages?beta=true' })],
+    ['the marker with the count_tokens path', () => classifier(STAGE1, { url: 'https://api.anthropic.com/v1/messages/count_tokens?beta=true' })],
+    ['the marker without ?beta=true', () => classifier(STAGE1, { url: 'https://api.anthropic.com/v1/messages' })],
+    ['the marker with GET', () => classifier(STAGE1, { method: 'GET' })],
+    ['the marker with a lower-case method', () => classifier(STAGE1, { method: 'post' })],
+    ['the marker with no method (GET by default)', () => {
+      const ev = classifier(STAGE1)
+      delete ev.init.method
+      return ev
+    }],
+    ['the marker with tools', () => classifier({ ...STAGE1, tools: CONVERSATION.tools })],
+    ['the marker with thread create', () => classifier({ ...STAGE1, thread: { type: 'create' } })],
+    ['the marker with thread continue', () => classifier({ ...STAGE1, thread: { type: 'continue', previous_message_id: 'msg_1' } })],
+    ['the marker with stream', () => classifier({ ...STAGE1, stream: true })],
+    ['the marker with safeguards', () => classifier({ ...STAGE1, safeguards: [{ type: 'dangerous_tool_use' }] })],
+    ['the marker with output_config', () => classifier({ ...STAGE1, output_config: {} })],
+    ['the marker with another key outside the allowlist', () => classifier({ ...STAGE1, fallbacks: [] })],
+    ['the marker with an agent header', () => classifier(STAGE1, { agent: 'main' })],
+    ['the marker with an empty agent header', () => classifier(STAGE1, { headers: { 'X-Claude-Code-Agent-Id': '' } })],
+    ['the marker from a non-engine origin', () => classifier(STAGE1), 'other-plugin'],
+    ['the beta only as a substring of another token', () => classifier(STAGE1, { headers: { 'anthropic-beta': 'x-auto-mode-classifier-2026-07-16-y' } })],
+    ['the beta with a malformed date', () => classifier(STAGE1, { headers: { 'anthropic-beta': 'auto-mode-classifier-2026-7-16' } })],
+    ['the beta under two header keys', () => classifier(STAGE1, { headers: { 'Anthropic-Beta': 'claude-code-20250219' } })],
+    ['no classifier beta', () => classifier(STAGE1, { headers: { 'anthropic-beta': 'claude-code-20250219,claude-code-side-query-2026-09-29' } })],
+    ['the marker with an empty model', () => classifier({ ...STAGE1, model: '' })],
+    ['the marker with a non-string model', () => classifier({ ...STAGE1, model: ['claude-sonnet-5'] })],
+    ['the marker with a bare provider name as model', () => classifier({ ...STAGE1, model: 'openai' })],
+    ['the marker with a JSON array body', () => classifier([STAGE1])],
+    ['the marker with a non-string body', () => {
+      const ev = classifier(STAGE1)
+      ev.init.body = { ...STAGE1 }
+      return ev
+    }],
+    ['an ordinary conversation request rewritten to a real model id, marker added', () => classifier({ ...CONVERSATION, model: 'claude-sonnet-5' })],
+    ['a retry of the conversation with a real model id and no marker', () => engineReq({ ...CONVERSATION_NO_THREAD, model: 'claude-sonnet-5' })],
+    ['the recorded session-title request', () => engineReq({ max_tokens: 512, messages: TRANSCRIPT, metadata: { user_id: 'u' }, model: 'claude-haiku-5-5', output_config: {}, stream: true, system: [{ type: 'text', text: 'title' }], tools: [] }, { headers: { 'anthropic-beta': 'claude-code-20250219,claude-code-side-query-2026-09-29' } })],
+  ]
+  for (const [name, make, origin] of cases) {
+    test(name, async () => {
+      resetShadow()
+      const net = network()
+      await withJobs(['main'], async () => {
+        expect(refused(await fetchVia(net, make(), ON, origin ?? 'engine'))).toBe(true)
+      })
+      expect(net.calls.length).toBe(0)
+    })
+  }
+})
+
+describe('classifier exception: the shadow model under the classifier shape stays with rule 1', () => {
+  test('answered locally (the one match, or refused), never passed, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    await withJobs(['main'], async () => {
+      // Consistent with the main job: the strict match answers it locally.
+      expect(passed(await fetchVia(net, classifier({ ...STAGE1, model: SHADOW_MODEL })))).toBe(false)
+      // Any further one, and one for a loop with no job: refused.
+      expect(refused(await fetchVia(net, classifier({ ...STAGE1, model: SHADOW_MODEL })))).toBe(true)
+    })
+    expect(refused(await fetchVia(net, classifier({ ...STAGE1, model: SHADOW_MODEL })))).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+})
+
+describe('session flags: routedSeen and stepSeen', () => {
+  test('both false after resetShadow (a module reload)', () => {
+    resetShadow()
+    noteStep(true)
+    expect(sessionFlags()).toEqual({ routedSeen: true, stepSeen: true })
+    resetShadow()
+    expect(sessionFlags()).toEqual({ routedSeen: false, stepSeen: false })
+  })
+
+  test('an unprefixed step sets stepSeen only; a routed step sets both; an unprefixed step never clears routedSeen', () => {
+    resetShadow()
+    noteStep(false)
+    expect(sessionFlags()).toEqual({ routedSeen: false, stepSeen: true })
+    noteStep(true)
+    expect(sessionFlags()).toEqual({ routedSeen: true, stepSeen: true })
+    noteStep(false)
+    expect(sessionFlags()).toEqual({ routedSeen: true, stepSeen: true })
+  })
+})
+
+describe('reload rule: with the opt-out a fresh module refuses until it has seen a step', () => {
+  test('autoModeClassifier false: refused while stepSeen is false, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    expect(refused(await fetchVia(net, classifier(STAGE1), OFF))).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('autoModeClassifier false: passes as ordinary traffic once only unprefixed steps were seen', async () => {
+    resetShadow()
+    const net = network()
+    noteStep(false)
+    expect(passed(await fetchVia(net, classifier(STAGE1), OFF))).toBe(true)
+    expect(net.calls.length).toBe(1)
+    // As ordinary traffic, a job pending on its loop (main) still refuses it.
+    await withJobs(['main'], async () => {
+      expect(refused(await fetchVia(net, classifier(STAGE1), OFF))).toBe(true)
+    })
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('a missing options object counts as the opt-out (refused), in the hook and in its .catch, zero network calls', async () => {
+    resetShadow()
+    const net = network()
+    expect(refused(await fetchVia(net, classifier(STAGE1), null as any))).toBe(true)
+    const out: any = await shadowFetchFailed(classifier(STAGE1), Object.assign(nextFrom(net, 'engine'), { called: false }), null as any)
+    expect(refused(out.value)).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('autoModeClassifier true: passes with no step seen', async () => {
+    resetShadow()
+    const net = network()
+    expect(passed(await fetchVia(net, classifier(STAGE1), ON))).toBe(true)
+    expect(net.calls.length).toBe(1)
+  })
+})
+
+describe('http.fetch .catch with the classifier exception', () => {
+  // `next` of a .catch: the network beneath, the host-set origin, whether the
+  // hook had already passed the request on, and why it failed.
+  const caughtFrom = (net: ReturnType<typeof network>, called: boolean, kind: 'throw' | 'timeout' = 'throw', plugin = 'engine') =>
+    Object.assign(nextFrom(net, plugin), { called, error: { kind, budget: 100 } })
+
+  // A classifier request whose `anthropic-beta` header throws when read: the
+  // predicate is the only reader of that header, so a throw (or the counter)
+  // shows the predicate was evaluated.
+  function trapped() {
+    const ev = classifier(STAGE1)
+    const reads = { n: 0 }
+    const headers: Record<string, string> = { ...ev.init.headers }
+    delete headers['anthropic-beta']
+    Object.defineProperty(headers, 'anthropic-beta', {
+      enumerable: true,
+      get() {
+        reads.n++
+        throw new Error('predicate failed')
+      },
+    })
+    ev.init.headers = headers
+    return { ev, reads }
+  }
+
+  test('with next.called false and a job pending, a request that would match the predicate is refused, zero forwards', async () => {
+    resetShadow()
+    const net = network()
+    await withJobs(['main'], async () => {
+      const out: any = await shadowFetchFailed(classifier(STAGE1), caughtFrom(net, false), ON)
+      expect(refused(out.value)).toBe(true)
+    })
+    await withJobs(['a1'], async () => {
+      const out: any = await shadowFetchFailed(classifier(STAGE2), caughtFrom(net, false), ON)
+      expect(refused(out.value)).toBe(true)
+    })
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('with next.called true it is replayed', async () => {
+    resetShadow()
+    const net = network()
+    await withJobs(['main'], async () => {
+      const out: any = await shadowFetchFailed(classifier(STAGE1), caughtFrom(net, true), ON)
+      expect(passed(out.value)).toBe(true)
+    })
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('a predicate that throws fails the hook; the .catch then refuses with a job pending, zero forwards', async () => {
+    resetShadow()
+    const net = network()
+    await withJobs(['main'], async () => {
+      const { ev } = trapped()
+      let err: unknown
+      try {
+        await shadowFetch(ev, nextFrom(net, 'engine'), ON)
+      } catch (x) {
+        err = x
+      }
+      expect(String(err)).toContain('predicate failed')
+      const out: any = await shadowFetchFailed(ev, caughtFrom(net, false), ON)
+      expect(refused(out.value)).toBe(true)
+    })
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('prefixed ids and the shadow model are refused by the .catch with no job pending', async () => {
+    resetShadow()
+    const net = network()
+    for (const ev of [
+      classifier({ ...STAGE1, model: 'custom:x:y' }),
+      engineReq({ ...CONVERSATION, model: 'openai:' }),
+      engineReq({ ...CONVERSATION }, { url: 'https://bedrock.example/model/zai:glm/invoke' }),
+      engineReq('{"model":"anthropic:claude-x", broken'),
+      engineReq({ ...CONVERSATION, model: SHADOW_MODEL }),
+    ]) {
+      const out: any = await shadowFetchFailed(ev, caughtFrom(net, false), ON)
+      expect(refused(out.value)).toBe(true)
+    }
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('autoModeClassifier false, no job: an unforwarded engine request is refused when routedSeen, zero forwards', async () => {
+    resetShadow()
+    const net = network()
+    noteStep(true)
+    for (const kind of ['throw', 'timeout'] as const) {
+      for (const ev of [classifier(STAGE1), engineReq({ ...CONVERSATION_NO_THREAD, model: 'claude-sonnet-5' })]) {
+        const out: any = await shadowFetchFailed(ev, caughtFrom(net, false, kind), OFF)
+        expect(refused(out.value)).toBe(true)
+      }
+      const t = trapped()
+      const out: any = await shadowFetchFailed(t.ev, caughtFrom(net, false, kind), OFF)
+      expect(refused(out.value)).toBe(true)
+      expect(t.reads.n).toBe(0)
+    }
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('autoModeClassifier false, no job: an unforwarded engine request is refused while stepSeen is false, zero forwards', async () => {
+    resetShadow()
+    const net = network()
+    for (const kind of ['throw', 'timeout'] as const) {
+      const out: any = await shadowFetchFailed(classifier(STAGE1), caughtFrom(net, false, kind), OFF)
+      expect(refused(out.value)).toBe(true)
+      const t = trapped()
+      const trappedOut: any = await shadowFetchFailed(t.ev, caughtFrom(net, false, kind), OFF)
+      expect(refused(trappedOut.value)).toBe(true)
+      expect(t.reads.n).toBe(0)
+    }
+    // Raised by the engine with the markers stripped: still an engine request.
+    const stripped = classifier(STAGE1)
+    delete stripped.init.headers['x-claude-code-session-id']
+    expect(refused(((await shadowFetchFailed(stripped, caughtFrom(net, false), OFF)) as any).value)).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('autoModeClassifier false, only unprefixed steps seen, no job: forwarded (ordinary traffic); the predicate is not evaluated', async () => {
+    resetShadow()
+    const net = network()
+    noteStep(false)
+    const t = trapped()
+    const out: any = await shadowFetchFailed(t.ev, caughtFrom(net, false), OFF)
+    expect(passed(out.value)).toBe(true)
+    expect(t.reads.n).toBe(0)
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('autoModeClassifier true, no job: the .catch never evaluates the predicate (it neither grants nor checks the exception)', async () => {
+    resetShadow()
+    const net = network()
+    const t = trapped()
+    const out: any = await shadowFetchFailed(t.ev, caughtFrom(net, false, 'timeout'), ON)
+    expect(passed(out.value)).toBe(true)
+    expect(t.reads.n).toBe(0)
+    expect(net.calls.length).toBe(1)
+  })
+
+  test("the mod's own request (not an engine request) is not refused by the opt-out rule", async () => {
+    resetShadow()
+    const net = network()
+    noteStep(true)
+    const own = { url: 'https://api.openai.com/v1/chat/completions', init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"gpt-5"}' } }
+    const out: any = await shadowFetchFailed(own, caughtFrom(net, false, 'throw', 'provider-router'), OFF)
+    expect(passed(out.value)).toBe(true)
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('a .catch that cannot read the request refuses it', async () => {
+    resetShadow()
+    const net = network()
+    const bad: any = { get url(): string {
+      throw new Error('unreadable')
+    }, init: { method: 'POST', headers: {}, body: '{}' } }
+    const out: any = await shadowFetchFailed(bad, caughtFrom(net, false), ON)
+    expect(refused(out.value)).toBe(true)
+    expect(net.calls.length).toBe(0)
+  })
+})
+
+describe('the router-prefix check agrees with route.ts', () => {
+  test('every prefix ID_FORMS names is refused, bare or with an id', async () => {
+    resetShadow()
+    const net = network()
+    const prefixes = [...ID_FORMS.matchAll(/\b([a-z]+):</g)].map(m => m[1]!)
+    expect(prefixes.sort()).toEqual(['anthropic', 'custom', 'openai', 'zai'])
+    for (const p of prefixes) {
+      expect(classifyModel(`${p}:a:b`).kind).not.toBe('unprefixed')
+      expect(refused(await fetchVia(net, engineReq({ ...CONVERSATION, model: `${p}:a:b` })))).toBe(true)
+      // A bare provider name is no classifier model either.
+      expect(refused(await withJobs(['main'], () => fetchVia(net, classifier({ ...STAGE1, model: p }))))).toBe(true)
+    }
+    expect(net.calls.length).toBe(0)
   })
 })

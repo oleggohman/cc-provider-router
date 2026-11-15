@@ -1,4 +1,5 @@
-// Configuration: API keys, custom endpoints and context windows.
+// Configuration: API keys, custom endpoints, context windows and the
+// auto-mode classifier option.
 // Read once per module load from `register` options (/config) and env.
 // A /config change reloads the module, so there are no live config reads.
 // Key values never appear in warnings or messages.
@@ -14,6 +15,8 @@ export type Config = {
   keys: Partial<Record<KeyedProvider, string>>
   custom: Map<string, CustomEndpoint>
   contextWindows: Map<string, number>
+  // Let the engine's auto-mode classifier requests through (shadow.ts).
+  autoModeClassifier: boolean
   warnings: string[]
 }
 
@@ -56,6 +59,18 @@ function splitPair(raw: string, at: 'first' | 'last'): { name: string; value: st
   const entry = raw.trim()
   const eq = at === 'first' ? entry.indexOf('=') : entry.lastIndexOf('=')
   return eq > 0 ? { name: entry.slice(0, eq).trim(), value: entry.slice(eq + 1).trim() } : { name: '', value: '' }
+}
+
+// The `autoModeClassifier` option: true when absent (the manifest default),
+// `true` / `false` as booleans or strings. Any other value turns it off, the
+// stricter choice: classifier requests are then refused once a step was routed.
+export function autoModeClassifierOf(options: Options): boolean {
+  const v = options.autoModeClassifier
+  return v === undefined || v === true || v === 'true'
+}
+
+function knownSwitch(v: unknown): boolean {
+  return v === undefined || v === true || v === false || v === 'true' || v === 'false'
 }
 
 export async function loadConfig($: Env, options: Options): Promise<Config> {
@@ -116,5 +131,7 @@ export async function loadConfig($: Env, options: Options): Promise<Config> {
     contextWindows.set(model, tokens)
   })
 
-  return { keys, custom, contextWindows, warnings }
+  if (!knownSwitch(options.autoModeClassifier)) warnings.push('autoModeClassifier: expected true or false; the classifier is off')
+
+  return { keys, custom, contextWindows, autoModeClassifier: autoModeClassifierOf(options), warnings }
 }

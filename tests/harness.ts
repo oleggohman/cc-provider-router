@@ -26,7 +26,7 @@ export function engine(extra: Record<string, unknown> = {}) {
     await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, (x: any) => {
       network.push(x)
       return { value: { status: 200, ok: true, headers: {}, text: '' } }
-    })
+    }, { autoModeClassifier: true })
     yield { kind: 'text', index: 0, text: 'ENGINE-STUB-CHUNK' }
     yield { kind: 'stop', stopReason: 'end_turn', usage: ZERO }
     return { turnId: e.turnId, index: e.index, answer: 'ENGINE-STUB-CHUNK', toolUses: [] }
@@ -75,7 +75,7 @@ export async function drain(g: AsyncGenerator<any, any> | AsyncIterable<any>) {
 }
 
 export function cfg(keys: Record<string, string>, over: any = {}): any {
-  return { keys, custom: new Map(), contextWindows: new Map(), warnings: [], ...over }
+  return { keys, custom: new Map(), contextWindows: new Map(), autoModeClassifier: true, warnings: [], ...over }
 }
 
 export const step = (model: string, over: any = {}) => ({ turnId: 't1', index: 0, model, messageCount: 3, effort: 'high', ...over })

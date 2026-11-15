@@ -11,6 +11,7 @@
     "anthropicApiKey": { "type": "string", "title": "Anthropic Platform API key", "description": "Key for anthropic: models. Overrides env ROUTER_ANTHROPIC_API_KEY.", "sensitive": true, "required": false },
     "zaiApiKey": { "type": "string", "title": "Z.ai API key", "description": "Key for zai: models. Overrides env ZAI_API_KEY.", "sensitive": true, "required": false },
     "customEndpoints": { "type": "string", "multiple": true, "title": "Custom endpoints", "description": "OpenAI-compatible endpoints as name=url, used as custom:<name>:<model>. Keys from env ROUTER_CUSTOM_API_KEYS (name=key,...).", "default": [] },
-    "contextWindows": { "type": "string", "multiple": true, "title": "Context windows", "description": "Extra context windows as model=tokens, e.g. openai:my-model=128000.", "default": [] }
+    "contextWindows": { "type": "string", "multiple": true, "title": "Context windows", "description": "Extra context windows as model=tokens, e.g. openai:my-model=128000.", "default": [] },
+    "autoModeClassifier": { "type": "boolean", "title": "Auto mode classifier", "description": "In auto mode, let Claude Code's own classifier requests reach the Anthropic API on your subscription; they carry the session's prompts and tool calls. Off: once a step is routed, those requests are refused and auto mode refuses tool calls no rule settles.", "default": true, "required": false }
   }
 }

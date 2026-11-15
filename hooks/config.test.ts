@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { loadConfig, missingKeyMessage, secretsOf } from './config.ts'
+import { autoModeClassifierOf, loadConfig, missingKeyMessage, secretsOf } from './config.ts'
 
 // A stand-in for `$` that holds only `env`: touching any other noun throws,
 // which proves config comes from options + env alone. (The test kit's `$` is
@@ -118,6 +118,41 @@ describe('loadConfig', () => {
     const c = await loadConfig(fakeEnv({ OPENAI_API_KEY: 'env-oa' }), { ...EMPTY, customEndpoints: ['a=http://a/v1'], contextWindows: ['m=1'] })
     expect(c.keys.openai).toBe('env-oa')
     expect(c.custom.size).toBe(1)
+  })
+})
+
+describe('autoModeClassifier option', () => {
+  test('defaults to true when the option is absent', async () => {
+    expect(autoModeClassifierOf({})).toBe(true)
+    expect((await loadConfig(fakeEnv({}), EMPTY)).autoModeClassifier).toBe(true)
+  })
+
+  test('true and false as booleans (the declared userConfig type)', async () => {
+    expect(autoModeClassifierOf({ autoModeClassifier: true })).toBe(true)
+    expect(autoModeClassifierOf({ autoModeClassifier: false })).toBe(false)
+    const c = await loadConfig(fakeEnv({}), { ...EMPTY, autoModeClassifier: false })
+    expect(c.autoModeClassifier).toBe(false)
+    expect(c.warnings).toEqual([])
+  })
+
+  test("the strings 'true' and 'false' are read as booleans", () => {
+    expect(autoModeClassifierOf({ autoModeClassifier: 'true' })).toBe(true)
+    expect(autoModeClassifierOf({ autoModeClassifier: 'false' })).toBe(false)
+  })
+
+  test('an unrecognized value turns the classifier off (the stricter choice) with a warning naming the field', async () => {
+    for (const v of ['yes', 0, 1, ['true'], '']) {
+      expect(autoModeClassifierOf({ autoModeClassifier: v as any })).toBe(false)
+      const c = await loadConfig(fakeEnv({}), { ...EMPTY, autoModeClassifier: v as any })
+      expect(c.autoModeClassifier).toBe(false)
+      expect(c.warnings.length).toBe(1)
+      expect(c.warnings[0]).toContain('autoModeClassifier')
+    }
+  })
+
+  test('env does not set it: config comes from the option alone', async () => {
+    const c = await loadConfig(fakeEnv({ AUTO_MODE_CLASSIFIER: 'false' }), EMPTY)
+    expect(c.autoModeClassifier).toBe(true)
   })
 })
 

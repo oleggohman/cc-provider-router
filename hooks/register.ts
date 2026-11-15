@@ -5,7 +5,7 @@
 import type { Register } from 'claude-code'
 import { raceCall, type AdapterResult, type Fetch, type Sleep } from './call.ts'
 import { toChunks, toResult } from './chunks.ts'
-import { loadConfig, missingKeyMessage, secretsOf, type Config } from './config.ts'
+import { autoModeClassifierOf, loadConfig, missingKeyMessage, secretsOf, type Config } from './config.ts'
 import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
 import { PREFIX, errorChunks, localError, sanitize } from './errors.ts'
 import { maxOutputTokens } from './limits.ts'
@@ -13,8 +13,8 @@ import { ANTHROPIC_ROWS, complete as anthropicComplete } from './providers/anthr
 import { complete as openaiComplete, targetFor } from './providers/openai.ts'
 import { providersCommand } from './providers-command.ts'
 import { buildRequest, type ProviderRequest } from './request.ts'
-import { ID_FORMS, classifyModel, prefixOf, routeLabel, type Route } from './route.ts'
-import { loopKeyOf, shadowFetch, shadowFetchFailed, shadowStats, shadowStep, type ShadowStepEvent } from './shadow.ts'
+import { ID_FORMS, classifyModel, prefixOf, routeLabel, type ModelKind, type Route } from './route.ts'
+import { loopKeyOf, noteStep, shadowFetch, shadowFetchFailed, shadowStats, shadowStep, type ShadowOptions, type ShadowStepEvent } from './shadow.ts'
 import { dropBase, normalizeBody, recordStep, resolveThread, type Recovery, type Threads } from './thread.ts'
 
 // What the router keeps per loop between steps.
@@ -52,6 +52,13 @@ export function onSubagentTurnEnd(s: LoopState, agentId: string): void {
   const key = loopKeyOf(agentId)
   s.usage.delete(key)
   dropBase(s.threads, key)
+}
+
+// Notes a step of any loop for the session flags of the autoModeClassifier
+// opt-out (shadow.ts): an id with a router prefix, malformed included, counts
+// as routed.
+export function markStep(model: ModelKind): void {
+  noteStep(model.kind !== 'unprefixed')
 }
 
 // The loop's conversation in Messages API form, for rebuilding a continue the
@@ -94,14 +101,18 @@ function cachedConfig($: any, options: Parameters<Register>[1], cache: ConfigCac
 export const register: Register = (on, options) => {
   const cache: ConfigCache = {}
   const state: LoopState = { usage: new Map(), threads: new Map() }
+  // Read from the options alone (no env), so the fetch hook has it at once.
+  const shadowOptions: ShadowOptions = { autoModeClassifier: autoModeClassifierOf(options) }
 
   // Shadow capture: answers the engine's shadow requests locally and refuses
-  // every request that could be one (see shadow.ts). Fail closed: a guard
-  // that fails is otherwise skipped and the request goes on.
-  on('http.fetch', async (_$, e, next) => shadowFetch(e, next) as any).catch((_$, e, next) => shadowFetchFailed(e, next) as any)
+  // every request that could be one, or that names a router-prefixed model;
+  // lets the auto-mode classifier through per the option (see shadow.ts).
+  // Fail closed: a guard that fails is otherwise skipped and the request goes on.
+  on('http.fetch', async (_$, e, next) => shadowFetch(e, next, shadowOptions) as any).catch((_$, e, next) => shadowFetchFailed(e, next, shadowOptions) as any)
 
   on('turn.step', async function* ($, e, next) {
     const model = classifyModel(e.model)
+    markStep(model)
     if (model.kind === 'unprefixed') {
       onUnprefixedStep(state, e.agentId)
       return yield* next(e)
@@ -134,7 +145,9 @@ export const register: Register = (on, options) => {
   }).catch(async function* (_$, e, next) {
     // The hook itself failed (threw past its own catch, or overran): a routed
     // model still never reaches the engine.
-    if (classifyModel(e.model).kind === 'unprefixed') return yield* next(e)
+    const model = classifyModel(e.model)
+    markStep(model)
+    if (model.kind === 'unprefixed') return yield* next(e)
     return yield* errorChunks(e, localError(prefixOf(e.model), `internal error: ${next.error.message ?? next.error.kind}`))
   })
 

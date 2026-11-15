@@ -259,17 +259,17 @@ Each item is answered live and recorded as a row in `docs/design-notes.md` with 
 **Files:**
 - Modify: `hooks/shadow.ts`, `hooks/shadow.test.ts`, `hooks/config.ts`, `hooks/config.test.ts`, `.claude-plugin/plugin.json`, `hooks/register.ts`, `hooks/register.test.ts`
 
-- [ ] write tests for the new unconditional rule, each refused with zero network calls, with and without a pending job: an engine request naming a router-prefixed model (`custom:x:y`, `anthropic:...`, `zai:...`, `openai:...`); a malformed prefix (`openai:`, `custom:gw`); a prefixed id in the URL; an unreadable body while any job is pending
-- [ ] write tests for the predicate from Task 2, from the recorded shapes (stage 1, stage 2): a classifier request reaches `next` exactly once, with a job pending on the main loop, with a job pending on a subagent loop, and with none; with `autoModeClassifier: false` and `routedSeen` it is refused
-- [ ] write negative tests, each refused with zero network calls while a job is pending: the classifier marker with a shadow URL; with another host or path (`count_tokens`); with `GET`; with `tools`; with `thread` (create and continue); with `stream`, `safeguards`, `output_config` or any key outside the allowlist; with an agent header; with a non-engine origin; the beta only as a substring of another token; an ordinary conversation request rewritten to a real model id; a retry of the conversation with a real model id and no marker; the recorded session-title request
-- [ ] write tests for the engine's own prefixed requests recorded in Task 2, each refused with no job pending: the classifier retry (`custom:x:y`, classifier keys), the prompt suggestion and the compaction request (conversation keys, `fallbacks`)
-- [ ] write tests for `shadowFetchFailed`: with `next.called` false and a job pending, a request that would match the predicate is refused; with `next.called` true it is replayed; a predicate function that throws leads to a refusal
-- [ ] write tests for the session flags: `routedSeen` after a routed step of any loop and never cleared by an unprefixed step; `stepSeen` after any step; both false after `resetShadow`
-- [ ] write tests for the reload rule: with `autoModeClassifier: false`, a classifier request is refused while `stepSeen` is false, and passes as ordinary traffic once only unprefixed steps were seen; with it `true`, it passes
-- [ ] write tests for `shadowFetchFailed` with no pending job and `autoModeClassifier: false`: an unforwarded engine request is refused with zero forwards when `routedSeen` or not `stepSeen`, also when the predicate function throws and when the hook overran its budget; the predicate is not called from `.catch`
-- [ ] add the `autoModeClassifier` option (`userConfig` boolean, default `true`) to `plugin.json` and `loadConfig`
-- [ ] implement the rule order of "Solution Overview" in `shadowFetch` and the stricter `.catch`
-- [ ] run tests, typecheck, validate - must pass before Task 6
+- [x] write tests for the new unconditional rule, each refused with zero network calls, with and without a pending job: an engine request naming a router-prefixed model (`custom:x:y`, `anthropic:...`, `zai:...`, `openai:...`); a malformed prefix (`openai:`, `custom:gw`); a prefixed id in the URL; an unreadable body while any job is pending
+- [x] write tests for the predicate from Task 2, from the recorded shapes (stage 1, stage 2): a classifier request reaches `next` exactly once, with a job pending on the main loop, with a job pending on a subagent loop, and with none; with `autoModeClassifier: false` and `routedSeen` it is refused
+- [x] write negative tests, each refused with zero network calls while a job is pending: the classifier marker with a shadow URL; with another host or path (`count_tokens`); with `GET`; with `tools`; with `thread` (create and continue); with `stream`, `safeguards`, `output_config` or any key outside the allowlist; with an agent header; with a non-engine origin; the beta only as a substring of another token; an ordinary conversation request rewritten to a real model id; a retry of the conversation with a real model id and no marker; the recorded session-title request
+- [x] write tests for the engine's own prefixed requests recorded in Task 2, each refused with no job pending: the classifier retry (`custom:x:y`, classifier keys), the prompt suggestion and the compaction request (conversation keys, `fallbacks`)
+- [x] write tests for `shadowFetchFailed`: with `next.called` false and a job pending, a request that would match the predicate is refused; with `next.called` true it is replayed; a predicate function that throws leads to a refusal
+- [x] write tests for the session flags: `routedSeen` after a routed step of any loop and never cleared by an unprefixed step; `stepSeen` after any step; both false after `resetShadow`
+- [x] write tests for the reload rule: with `autoModeClassifier: false`, a classifier request is refused while `stepSeen` is false, and passes as ordinary traffic once only unprefixed steps were seen; with it `true`, it passes
+- [x] write tests for `shadowFetchFailed` with no pending job and `autoModeClassifier: false`: an unforwarded engine request is refused with zero forwards when `routedSeen` or not `stepSeen`, also when the predicate function throws and when the hook overran its budget; the predicate is not called from `.catch`
+- [x] add the `autoModeClassifier` option (`userConfig` boolean, default `true`) to `plugin.json` and `loadConfig`
+- [x] implement the rule order of "Solution Overview" in `shadowFetch` and the stricter `.catch`
+- [x] run tests, typecheck, validate - must pass before Task 6
 
 ### Task 6: The fetch-side handler (`answerShadow`) with the outbound guard
 

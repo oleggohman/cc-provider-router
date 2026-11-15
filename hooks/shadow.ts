@@ -23,7 +23,29 @@
 //   engine request is one the host raised as the engine (`next.origin`), not
 //   one with engine markers (any plugin can set those).
 // - The stub reports zero usage; its chunks are drained and never yielded.
+//
+// Rule order for every engine request (one the host raised as the engine, or
+// one carrying engine markers):
+// 1. it names the shadow model (body or URL): the one strict match of a
+//    pending job is answered locally, every other one is refused;
+// 2. it names a router-prefixed or malformed-prefix model id (body, URL, or
+//    unparseable text), or its body is unreadable while any job is pending:
+//    refused, pending job or not. The engine sends requests of its own under
+//    the session's prefixed id that bypass turn.step (prompt suggestion, its
+//    own compaction, the classifier's retry); none may reach the first-party
+//    host;
+// 3. it matches the auto-mode classifier predicate (isClassifierRequest):
+//    passed when the autoModeClassifier option is on; with it off, refused
+//    once a step was routed since the module loaded, or while no step was
+//    seen at all (a reload clears both flags), else treated as rule 4/5;
+// 4. any other engine request of a loop with a pending job: refused;
+// 5. anything else: passed.
+// The predicate marks the engine's classifier traffic; it is not payload
+// isolation and not model validation: a hook above may rewrite an engine
+// request without changing its origin. The `.catch` never evaluates it and
+// never grants the exception.
 
+import { classifyModel } from './route.ts'
 import { stubSse } from './sse.ts'
 
 export const SHADOW_MODEL = 'provider-router-shadow'
@@ -70,6 +92,15 @@ const counters = { shadowLeaks: 0, shadowRefused: 0 }
 // plugin's fetch cannot pose as one) or the module reloads.
 const breaker = { engineSeen: 0, blind: false }
 
+// Session flags since the module loaded, for the autoModeClassifier opt-out:
+// some step was routed (any loop; never cleared by an unprefixed step), and
+// some step was seen at all. A reload clears both, so under the opt-out a
+// fresh module refuses classifier requests until it has seen a step.
+const session = { routedSeen: false, stepSeen: false }
+
+// The fetch hook's view of the plugin options.
+export type ShadowOptions = { readonly autoModeClassifier: boolean }
+
 const BLIND = "routing is off: this plugin saw no engine request for a routed step (an organization guard may hide Claude Code's requests), so none is sent; it resumes once the plugin sees a Claude Code request, or restart Claude Code"
 
 export function shadowStats(): { shadowLeaks: number; shadowRefused: number; pending: number; blind: boolean } {
@@ -83,6 +114,19 @@ export function resetShadow(): void {
   counters.shadowRefused = 0
   breaker.engineSeen = 0
   breaker.blind = false
+  session.routedSeen = false
+  session.stepSeen = false
+}
+
+// The turn.step hook's note of a step: `routed` for any id with a router
+// prefix (a malformed one included).
+export function noteStep(routed: boolean): void {
+  session.stepSeen = true
+  if (routed) session.routedSeen = true
+}
+
+export function sessionFlags(): { routedSeen: boolean; stepSeen: boolean } {
+  return { ...session }
 }
 
 export class ShadowError extends Error {}
@@ -102,6 +146,11 @@ export function loopKeyOf(agentId: string | undefined): string {
   return agentId || 'main'
 }
 
+// Whether a header of that name is present, with any value, in any case.
+function hasHeader(headers: Record<string, string> | undefined, name: string): boolean {
+  return !!headers && Object.keys(headers).some(k => k.toLowerCase() === name)
+}
+
 // Loop of an engine request, from its agent header.
 function loopKey(headers: Record<string, string> | undefined): string {
   return loopKeyOf(header(headers, 'x-claude-code-agent-id'))
@@ -119,6 +168,12 @@ export function isEngineRequest(e: FetchEvent): boolean {
 
 // The hook's `next`, with the host-set origin of the request.
 type Origin = { readonly origin?: { readonly plugin?: string } }
+
+// An engine request for the refusal rules: raised by the engine (host-set
+// origin) or carrying engine markers. The wider rule is the stricter one.
+function engineRequest(e: FetchEvent, next: Origin): boolean {
+  return next.origin?.plugin === 'engine' || isEngineRequest(e)
+}
 
 // Proof the engine raised the request: `next.origin`, set by the host alone
 // ("engine" for the engine's own sends); nothing a plugin writes reaches it.
@@ -167,6 +222,76 @@ function namesShadow(e: FetchEvent, body: any | null): boolean {
   return body ? body.model === SHADOW_MODEL : mentionsShadow(e.init?.body)
 }
 
+// Router prefixes, as route.ts parses them (a test keeps the two in step).
+const PREFIXES = '(?:anthropic|openai|zai|custom)'
+// A model id with a router prefix, or a bare provider name (the classifier's
+// model check, as scripts/probes/check-predicate.py has it).
+const ROUTER_ID = new RegExp(`^${PREFIXES}(?::|$)`)
+// A prefixed id in a URL's path or query (not its scheme or host).
+const ID_IN_URL = new RegExp(`(?:^|[^A-Za-z0-9_.-])${PREFIXES}:`)
+// A prefixed model in a body that does not parse.
+const ID_IN_TEXT = new RegExp(`"model"\\s*:\\s*"${PREFIXES}:`)
+
+function urlNamesPrefixed(url: string): boolean {
+  const rest = url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/, '')
+  let decoded = rest
+  try {
+    decoded = decodeURIComponent(rest)
+  } catch {
+    // Malformed escapes: the raw text is checked.
+  }
+  return ID_IN_URL.test(rest) || ID_IN_URL.test(decoded)
+}
+
+// Rule 2: a router-prefixed or malformed-prefix model id in the parsed body's
+// model, in the URL, or in a text body that does not parse.
+function namesPrefixed(e: FetchEvent, body: any | null): boolean {
+  if (urlNamesPrefixed(e.url)) return true
+  if (body && typeof body === 'object') return typeof body.model === 'string' && classifyModel(body.model).kind !== 'unprefixed'
+  const raw = e.init?.body
+  return typeof raw === 'string' && ID_IN_TEXT.test(raw)
+}
+
+// A body that is present but cannot be read as JSON.
+function unreadable(e: FetchEvent, body: any | null): boolean {
+  const raw = e.init?.body
+  return raw !== undefined && raw !== null && !(body && typeof body === 'object')
+}
+
+const CLASSIFIER_URL = 'https://api.anthropic.com/v1/messages?beta=true'
+const CLASSIFIER_BETA = /^auto-mode-classifier-\d{4}-\d{2}-\d{2}$/
+const CLASSIFIER_KEYS = new Set(['max_tokens', 'messages', 'metadata', 'model', 'stop_sequences', 'system', 'thinking'])
+
+// The auto-mode classifier predicate (docs/design-notes.md, "Answer in
+// place: spike"; scripts/probes/check-predicate.py). Evaluated only after the
+// unconditional refusals, never from the `.catch`. Header names in any case;
+// two `anthropic-beta` keys, an unreadable or unparseable body never match.
+export function isClassifierRequest(e: FetchEvent, next: Origin): boolean {
+  if (next.origin?.plugin !== 'engine') return false
+  if ((e.init?.method ?? 'GET') !== 'POST') return false
+  if (e.url !== CLASSIFIER_URL) return false
+  const headers = e.init?.headers
+  if (!headers) return false
+  const betaKeys = Object.keys(headers).filter(k => k.toLowerCase() === 'anthropic-beta')
+  if (betaKeys.length !== 1) return false
+  const beta = headers[betaKeys[0]!]
+  if (typeof beta !== 'string' || !beta.split(',').some(t => CLASSIFIER_BETA.test(t.trim()))) return false
+  if (hasHeader(headers, 'x-claude-code-agent-id')) return false
+  const raw = e.init?.body
+  if (typeof raw !== 'string') return false
+  let body: unknown
+  try {
+    body = JSON.parse(raw)
+  } catch {
+    return false
+  }
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return false
+  const model = (body as { model?: unknown }).model
+  if (typeof model !== 'string' || model === '' || model === SHADOW_MODEL) return false
+  if (classifyModel(model).kind !== 'unprefixed' || ROUTER_ID.test(model)) return false
+  return Object.keys(body).every(k => CLASSIFIER_KEYS.has(k))
+}
+
 // `e.messageCount` counts the loop's stored rows (reminders, attachments,
 // tool results as their own rows); the engine merges them into fewer API
 // messages (live: 22 rows -> 2 messages). So a request is consistent when it
@@ -187,11 +312,11 @@ async function answer(job: Job, body: any): Promise<ShadowResponse> {
 }
 
 // `http.fetch` hook. Returns the local answer, or calls `next` only for
-// requests that are clearly not shadows.
-export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin): Promise<R | { value: ShadowResponse }> {
+// requests that are clearly not shadows (rule order in the header).
+export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin, opts: ShadowOptions): Promise<R | { value: ShadowResponse }> {
   noteOrigin(next)
   const body = parse(e.init?.body)
-  if (!isEngineRequest(e)) {
+  if (!engineRequest(e, next)) {
     // Defence in depth: never pass anything that could be a shadow. A routed
     // provider request whose conversation merely quotes the shadow model's
     // name parses, with its own model, and goes on.
@@ -203,30 +328,46 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) =
   }
   const key = loopKey(e.init?.headers)
   const p = pending.get(key)
-  if (p) {
-    if (body && body.model === SHADOW_MODEL && p.phase === 'registered' && countMatches(body.messages, p.messageCount)) {
-      p.body = body
-      p.phase = 'captured'
-      return { value: await answer(p, body) }
-    }
-    // Any other engine request of a loop with a pending shadow (a 2nd or 3rd
-    // request, a side request, a retry): refused, never passed.
-    return { value: refuse() }
+  // 1. The shadow model: the one strict match is answered, the rest refused.
+  if (p && body && body.model === SHADOW_MODEL && p.phase === 'registered' && countMatches(body.messages, p.messageCount)) {
+    p.body = body
+    p.phase = 'captured'
+    return { value: await answer(p, body) }
   }
   if (namesShadow(e, body)) return { value: refuse() }
+  // 2. A router-prefixed id, or a body we cannot read while a job is pending.
+  if (namesPrefixed(e, body)) return { value: refuse() }
+  if (pending.size > 0 && unreadable(e, body)) return { value: refuse() }
+  // 3. The auto-mode classifier.
+  if (isClassifierRequest(e, next)) {
+    if (opts?.autoModeClassifier === true) return next(e)
+    if (session.routedSeen || !session.stepSeen) return { value: refuse() }
+  }
+  // 4. Any other engine request of a loop with a pending shadow (a 2nd or 3rd
+  // request, a side request, a retry): refused, never passed.
+  if (p) return { value: refuse() }
   return next(e)
 }
 
 // The `http.fetch` hook's `.catch`: shadowFetch threw or overran before it
 // answered (a failed guard is otherwise skipped and the request goes on).
-// Already passed on by the hook: replayed. Otherwise anything that could be
-// a shadow is refused: any request while a shadow is pending, or one naming
-// the shadow model anywhere in its URL or text body.
-export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin & { readonly called: boolean }): R | { value: ShadowResponse } {
+// Already passed on by the hook: replayed. Otherwise refused: any request
+// while a shadow is pending; one naming the shadow model anywhere in its URL
+// or text body, or a router-prefixed id; and with autoModeClassifier off, any
+// engine request once a step was routed or while no step was seen. The
+// classifier predicate is never evaluated here and the exception never
+// granted. A request this cannot read is refused.
+export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin & { readonly called: boolean }, opts: ShadowOptions): R | { value: ShadowResponse } {
   noteOrigin(next)
   if (next.called) return next(e)
-  const body = e.init?.body
-  if (pending.size > 0 || e.url.includes(SHADOW_MODEL) || (typeof body === 'string' && body.includes(SHADOW_MODEL))) return { value: refuse() }
+  try {
+    const raw = e.init?.body
+    if (pending.size > 0 || e.url.includes(SHADOW_MODEL) || (typeof raw === 'string' && raw.includes(SHADOW_MODEL))) return { value: refuse() }
+    if (namesPrefixed(e, parse(raw))) return { value: refuse() }
+    if (opts?.autoModeClassifier !== true && engineRequest(e, next) && (session.routedSeen || !session.stepSeen)) return { value: refuse() }
+  } catch {
+    return { value: refuse() }
+  }
   return next(e)
 }
 

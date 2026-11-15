@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
-import { onSubagentTurnEnd, onUnprefixedStep } from './register.ts'
+import { markStep, onSubagentTurnEnd, onUnprefixedStep } from './register.ts'
+import { classifyModel } from './route.ts'
+import { resetShadow, sessionFlags } from './shadow.ts'
 import { drain } from '../tests/harness.ts'
 
 test('unprefixed turn.step passes through to next unchanged', async ($, on) => {
@@ -105,4 +107,34 @@ test('session.start: a refused /providers registration does not fail the session
   const r: any = await ($ as any).session.start({ cwd: '/tmp', surface: null, isInteractive: false })
   expect(asked).toBe(1)
   expect(r.cwd).toBe('/tmp')
+})
+
+// ---------------------------------------------------------------------------
+// Session flags for the autoModeClassifier opt-out (shadow.ts): set by the
+// turn.step hook for every step, before anything else runs.
+
+test('markStep: a routed step of any loop sets routedSeen and stepSeen; an unprefixed step never clears routedSeen', () => {
+  resetShadow()
+  markStep(classifyModel('claude-haiku-4-5'))
+  expect(sessionFlags()).toEqual({ routedSeen: false, stepSeen: true })
+  markStep(classifyModel('custom:gw:m'))
+  expect(sessionFlags()).toEqual({ routedSeen: true, stepSeen: true })
+  markStep(classifyModel('claude-haiku-4-5'))
+  expect(sessionFlags()).toEqual({ routedSeen: true, stepSeen: true })
+  resetShadow()
+})
+
+test('markStep: a malformed prefixed id counts as routed (the stricter reading)', () => {
+  resetShadow()
+  markStep(classifyModel('openai:'))
+  expect(sessionFlags()).toEqual({ routedSeen: true, stepSeen: true })
+  resetShadow()
+})
+
+test('the plugin loads with autoModeClassifier false and unprefixed steps still pass through', { options: { autoModeClassifier: false } }, async ($, on) => {
+  on('clock.sleep', () => ({ value: undefined }) as any)
+  const seen = engineStub(on)
+  const { result } = await drain($.turn.step({ turnId: 't1', index: 0, model: 'claude-haiku-4-5', messageCount: 1 }) as any)
+  expect(seen.length).toBe(1)
+  expect(result.answer).toBe('ENGINE')
 })
