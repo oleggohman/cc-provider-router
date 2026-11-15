@@ -27,7 +27,9 @@ session can never loop. Every tool call it emits is harmless:
 A request whose first user text asks for "the single word PONG" (the
 subagent started by `agent`) is answered PONG. A request whose system prompt
 contains MOCKWORKER (a routed subagent, see the README) and that carries no
-fresh scenario emits the outside Bash touch, then `SUB-SAW: <tool result>`.
+fresh scenario emits the outside Bash touch followed by `echo MOCK-WORKER-RAN`
+(so the tool result shows the command ran even when the OS sandbox stops the
+write), then `SUB-SAW: <tool result>`.
 With env MOCK_PONG_HTTP=<n> the PONG subagent's request fails with HTTP <n>
 (what a parent agent sees of a routed subagent's error reply).
 
@@ -165,11 +167,12 @@ class H(BaseHTTPRequestHandler):
         usage = {'prompt_tokens': 11, 'completion_tokens': 7}
         msg, fin = {'role': 'assistant', 'content': 'MOCK-DONE'}, 'stop'
         touch = {'command': 'touch ' + MARKER, 'description': 'touch marker'}
+        worker_touch = {'command': 'touch ' + MARKER + '; echo MOCK-WORKER-RAN', 'description': 'touch marker'}
         if worker and scenario == 'done':
             if after_tool:
                 msg = {'role': 'assistant', 'content': 'SUB-SAW: ' + ' | '.join(t[:300] for t in tool_texts)}
             else:
-                msg, fin = {'role': 'assistant', 'content': None, 'tool_calls': [tool_call('call_w_1', 'Bash', touch)]}, 'tool_calls'
+                msg, fin = {'role': 'assistant', 'content': None, 'tool_calls': [tool_call('call_w_1', 'Bash', worker_touch)]}, 'tool_calls'
         elif pong:
             if os.environ.get('MOCK_PONG_HTTP'):
                 return self._send(int(os.environ['MOCK_PONG_HTTP']), {'error': {'message': 'mock provider failure', 'type': 'mock_error'}})

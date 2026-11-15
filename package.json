@@ -7,6 +7,7 @@
   "scripts": {
     "test": "claude plugin test . && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/curl-integration.mts",
     "typecheck": "npm_config_cache=\"$TMPDIR/npm-cache\" npx -y -p typescript@5.6.3 tsc -p .",
-    "validate": "claude plugin validate ."
+    "validate": "claude plugin validate .",
+    "automode": "scripts/automode-check.sh"
   }
 }

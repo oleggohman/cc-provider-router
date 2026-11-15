@@ -8,7 +8,12 @@ what the probes (`scripts/probes/`) and the auto-mode check assert on.
 Each line: `t`, `seq`, `url`, `method`, `model` and `bodyKeys` (when the body
 is JSON), `bodyType`, `origin` (the host-set `next.origin`), `headers` (names
 only; a name that carries a credential is listed with `redacted: true`),
-`agent` (`subagent` when the request has `x-claude-code-agent-id`).
+`agent` (`subagent` when the request has `x-claude-code-agent-id`),
+`classifierBeta` (the `anthropic-beta` token matching
+`^auto-mode-classifier-\d{4}-\d{2}-\d{2}$`, else `null`; no other header
+value is ever written). With these fields the classifier predicate can be
+evaluated from the record: `scripts/probes/check-predicate.py --observer`
+checks the schema and classifies each line.
 
 The file is the plugin option `logFile`, else env `FETCH_OBSERVER_LOG`:
 

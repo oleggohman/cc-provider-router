@@ -9,11 +9,29 @@
 // file held before this module loaded is kept in front).
 //
 // Header values are never written, only header names: names that carry a
-// credential are listed with `redacted: true`.
+// credential are listed with `redacted: true`. The one exception is the
+// classifier token of `anthropic-beta` (`classifierBeta`): only a token that
+// matches CLASSIFIER_BETA is copied, never the rest of the header.
 
 import type { Register } from 'claude-code'
 
 const SECRET_NAME = /authorization|api-key|apikey|cookie|token|secret|credential|signature/i
+const CLASSIFIER_BETA = /^auto-mode-classifier-\d{4}-\d{2}-\d{2}$/
+
+// The `anthropic-beta` token that marks an auto-mode classifier request, or
+// null. Nothing else of the header is returned.
+function classifierBeta(headers: Record<string, unknown>): string | null {
+  for (const name of Object.keys(headers)) {
+    if (name.toLowerCase() !== 'anthropic-beta') continue
+    const value = headers[name]
+    if (typeof value !== 'string') continue
+    for (const token of value.split(',')) {
+      const t = token.trim()
+      if (CLASSIFIER_BETA.test(t)) return t
+    }
+  }
+  return null
+}
 
 type Sink = { path?: string; resolved: boolean; prefix: string; lines: string[]; chain: Promise<unknown> }
 
@@ -46,6 +64,7 @@ function describe(e: any, origin: unknown, seq: number): string {
       .sort()
       .map(name => (SECRET_NAME.test(name) || headers[name] === '[redacted]' ? { name: name.toLowerCase(), redacted: true } : { name: name.toLowerCase() })),
     agent: Object.keys(headers).some(k => k.toLowerCase() === 'x-claude-code-agent-id') ? 'subagent' : 'main',
+    classifierBeta: classifierBeta(headers),
   })
 }
 
