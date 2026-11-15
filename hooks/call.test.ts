@@ -136,6 +136,19 @@ describe('raceCall', () => {
     expect(await p).toEqual({ kind: 'done', value: 'reply' })
   })
 
+  test('a timer that failed without Esc: a later Esc still ends a hung call', async () => {
+    const parent = new AbortController()
+    const work = deferred<string>()
+    const failing = (_ms: number) => Promise.reject(new Error('clock refused'))
+    const p = raceCall(failing, parent.signal, () => work.promise, 1000)
+    await tick()
+    parent.abort()
+    const settled = await Promise.race([p, tick().then(() => 'still waiting')])
+    expect(settled).toEqual({ kind: 'cancelled' })
+    work.resolve('too late')
+    await tick()
+  })
+
   test('Esc in the same moment as the reply: cancelled wins', async () => {
     const s = fakeSleep()
     const parent = new AbortController()
