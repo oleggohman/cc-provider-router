@@ -1,5 +1,5 @@
 // Adapter for OpenAI-compatible Chat Completions APIs: the OpenAI Platform
-// (`openai:`) and every configured custom endpoint (`custom:<name>:`).
+// (`openai:`), xAI (`xai:`) and every configured custom endpoint (`custom:<name>:`).
 // The built Anthropic-shaped request is translated (translate.ts), sent
 // non-streaming to `<base>/chat/completions` with `Authorization: Bearer`
 // (no header for a custom endpoint without a key), and the reply translated
@@ -16,8 +16,12 @@ import { routeLabel, type Route } from '../route.ts'
 import { fromChat, toChat } from '../translate.ts'
 
 export const OPENAI_BASE = 'https://api.openai.com/v1'
+export const XAI_BASE = 'https://api.x.ai/v1'
 
-export type OpenAITarget = { label: string; baseUrl: string; key: string | undefined; reasoning: boolean }
+// `rejectsStop`: the endpoint refuses `stop` (xAI reasoning models); `effortScale`:
+// how `effort` maps to `reasoning_effort` ('openai' by default). Both are unset
+// (today's behaviour) for openai: and custom: targets.
+export type OpenAITarget = { label: string; baseUrl: string; key: string | undefined; reasoning: boolean; rejectsStop?: boolean; effortScale?: 'openai' | 'xai' }
 
 // OpenAI models that take `reasoning_effort` (and reject custom sampling).
 // The `-chat` variants of gpt-5 are not reasoning models.
@@ -25,14 +29,26 @@ export function isReasoningModel(model: string): boolean {
   return /^(o\d|gpt-5)/.test(model) && !/-chat\b/.test(model)
 }
 
-// The endpoint for an `openai:` or `custom:<name>:` route, or why there is
-// none (missing key, unknown endpoint name). Custom endpoints never get
+// Grok models reason, except the `-non-reasoning` variants. An id not yet known
+// counts as reasoning: the safer side (no `stop`, no sampling fields).
+export function isXaiReasoningModel(model: string): boolean {
+  return !model.includes('non-reasoning')
+}
+
+// The endpoint for an `openai:`, `xai:` or `custom:<name>:` route, or why there
+// is none (missing key, unknown endpoint name). Custom endpoints never get
 // `reasoning_effort`: whether a server accepts it is unknown.
-export function targetFor(route: Extract<Route, { provider: 'openai' | 'custom' }>, cfg: Config): { ok: true; target: OpenAITarget } | { ok: false; message: string } {
+export function targetFor(route: Extract<Route, { provider: 'openai' | 'custom' | 'xai' }>, cfg: Config): { ok: true; target: OpenAITarget } | { ok: false; message: string } {
   if (route.provider === 'openai') {
     const key = cfg.keys.openai
     if (!key) return { ok: false, message: missingKeyMessage('openai') }
     return { ok: true, target: { label: routeLabel(route), baseUrl: OPENAI_BASE, key, reasoning: isReasoningModel(route.model) } }
+  }
+  if (route.provider === 'xai') {
+    const key = cfg.keys.xai
+    if (!key) return { ok: false, message: missingKeyMessage('xai') }
+    const reasoning = isXaiReasoningModel(route.model)
+    return { ok: true, target: { label: routeLabel(route), baseUrl: XAI_BASE, key, reasoning, rejectsStop: reasoning, effortScale: 'xai' } }
   }
   const ep = cfg.custom.get(route.name)
   if (!ep) return { ok: false, message: `unknown custom endpoint "${route.name}": add ${route.name}=<url> to the /config field customEndpoints` }
@@ -54,7 +70,7 @@ function errorBody(text: string): string | undefined {
 export async function complete(fetch: Fetch, req: ProviderRequest, effort: string | number | undefined, t: OpenAITarget, secrets: readonly string[]): Promise<AdapterResult> {
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (t.key) headers.authorization = `Bearer ${t.key}`
-  const body = toChat(req, { reasoning: t.reasoning, effort })
+  const body = toChat(req, { reasoning: t.reasoning, effort, rejectsStop: t.rejectsStop, effortScale: t.effortScale })
   const res = await fetch(`${t.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) })
   if (!res.ok) return { ok: false, error: providerError(t.label, res.status, res.text, secrets) }
   const reply = fromChat(res.text, req.model)

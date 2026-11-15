@@ -1,16 +1,16 @@
 // Model-id router: decides from a model id's prefix which provider serves it.
 
 // The built-in providers: `<provider>:<id>`, each with its own key (config.ts).
-export type SimpleProvider = 'anthropic' | 'openai' | 'zai'
+export type SimpleProvider = 'anthropic' | 'openai' | 'zai' | 'xai'
 
 export type Route = { [P in SimpleProvider]: { provider: P; model: string } }[SimpleProvider] | { provider: 'custom'; name: string; model: string }
 
-const SIMPLE: readonly SimpleProvider[] = ['anthropic', 'openai', 'zai']
+const SIMPLE: readonly SimpleProvider[] = ['anthropic', 'openai', 'zai', 'xai']
 
 // The id forms the router accepts, as named in error text.
 export const ID_FORMS = `${SIMPLE.map(p => `${p}:<id>`).join(', ')} or custom:<name>:<id>`
 
-// Parses `anthropic:<id>`, `openai:<id>`, `zai:<id>` or `custom:<name>:<id>`.
+// Parses `anthropic:<id>`, `openai:<id>`, `zai:<id>`, `xai:<id>` or `custom:<name>:<id>`.
 // `<id>` may contain `/` and `:`. Returns null for an unprefixed id (the
 // router passes it to the engine untouched) and for a malformed one (see
 // malformedPrefix).

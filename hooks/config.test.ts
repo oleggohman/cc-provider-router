@@ -15,13 +15,29 @@ function fakeEnv(vars: Record<string, string>): any {
   })
 }
 
-const EMPTY = { openaiApiKey: '', anthropicApiKey: '', zaiApiKey: '', customEndpoints: [], contextWindows: [] }
+const EMPTY = { openaiApiKey: '', anthropicApiKey: '', zaiApiKey: '', xaiApiKey: '', customEndpoints: [], contextWindows: [] }
 
 describe('loadConfig', () => {
   test('env only', async () => {
     const c = await loadConfig(fakeEnv({ OPENAI_API_KEY: 'env-oa', ROUTER_ANTHROPIC_API_KEY: 'env-an', ZAI_API_KEY: 'env-zai' }), EMPTY)
     expect(c.keys).toEqual({ openai: 'env-oa', anthropic: 'env-an', zai: 'env-zai' })
     expect(c.warnings).toEqual([])
+  })
+
+  test('xAI key from XAI_API_KEY env', async () => {
+    const c = await loadConfig(fakeEnv({ XAI_API_KEY: 'env-xai' }), EMPTY)
+    expect(c.keys.xai).toBe('env-xai')
+    expect(c.warnings).toEqual([])
+  })
+
+  test('xAI key: the xaiApiKey option wins over XAI_API_KEY', async () => {
+    const c = await loadConfig(fakeEnv({ XAI_API_KEY: 'env-xai' }), { ...EMPTY, xaiApiKey: 'cfg-xai' })
+    expect(c.keys.xai).toBe('cfg-xai')
+  })
+
+  test('no xAI key when neither the option nor the env is set', async () => {
+    const c = await loadConfig(fakeEnv({}), EMPTY)
+    expect(c.keys.xai).toBe(undefined)
   })
 
   test('/config only', async () => {
@@ -129,5 +145,7 @@ describe('missingKeyMessage', () => {
     expect(missingKeyMessage('anthropic')).toContain('anthropicApiKey')
     expect(missingKeyMessage('zai')).toContain('ZAI_API_KEY')
     expect(missingKeyMessage('zai')).toContain('zaiApiKey')
+    expect(missingKeyMessage('xai')).toContain('XAI_API_KEY')
+    expect(missingKeyMessage('xai')).toContain('xaiApiKey')
   })
 })

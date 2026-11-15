@@ -20,11 +20,13 @@ export type ChatRequest = {
   stop?: unknown
   temperature?: unknown
   top_p?: unknown
-  reasoning_effort?: 'low' | 'medium' | 'high'
+  reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh'
   [k: string]: unknown
 }
 
-export type ChatOptions = { reasoning: boolean; effort?: string | number }
+// `rejectsStop`: drop `stop` (the endpoint refuses it). `effortScale` 'xai':
+// `xhigh` and `max` are sent as `xhigh`; 'openai' (default): both become `high`.
+export type ChatOptions = { reasoning: boolean; effort?: string | number; rejectsStop?: boolean; effortScale?: 'openai' | 'xai' }
 
 const IMAGE_MOVED = '(image attached in the next message)'
 const DOCUMENT_MOVED = '(document attached in the next message)'
@@ -139,9 +141,9 @@ function toolChoice(c: any): unknown {
   }
 }
 
-function reasoningEffort(effort: unknown): ChatRequest['reasoning_effort'] {
+function reasoningEffort(effort: unknown, scale: ChatOptions['effortScale']): ChatRequest['reasoning_effort'] {
   if (effort === 'low' || effort === 'medium' || effort === 'high') return effort
-  if (effort === 'xhigh' || effort === 'max') return 'high'
+  if (effort === 'xhigh' || effort === 'max') return scale === 'xai' ? 'xhigh' : 'high'
   return undefined
 }
 
@@ -166,10 +168,10 @@ export function toChat(req: ProviderRequest, opts: ChatOptions): ChatRequest {
   // One tool call per reply, as the captured request asked (only with tools:
   // OpenAI rejects parallel_tool_calls without them).
   if (tools.length && (req.tool_choice as any)?.disable_parallel_tool_use === true) chat.parallel_tool_calls = false
-  if (req.stop_sequences !== undefined) chat.stop = req.stop_sequences
+  if (req.stop_sequences !== undefined && !opts.rejectsStop) chat.stop = req.stop_sequences
   if (opts.reasoning) {
     // Reasoning models reject custom sampling settings.
-    const effort = reasoningEffort(opts.effort)
+    const effort = reasoningEffort(opts.effort, opts.effortScale)
     if (effort) chat.reasoning_effort = effort
   } else {
     if (req.temperature !== undefined) chat.temperature = req.temperature

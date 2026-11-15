@@ -60,15 +60,15 @@ One task, because adding `xai` to `SimpleProvider` makes `routedStep` hand xAI r
 **Files:**
 - Modify: `hooks/route.ts`, `hooks/route.test.ts`, `hooks/config.ts`, `hooks/config.test.ts`, `.claude-plugin/plugin.json`, `hooks/providers/openai.ts`, `hooks/providers/openai.test.ts`, `hooks/translate.ts`, `hooks/translate.test.ts`, `hooks/register.test.ts`
 
-- [ ] write tests: `parseModel('xai:grok-4.7')` → `{ provider: 'xai', model: 'grok-4.7' }`; ids with `/` and `:` after the prefix; `xai:` alone is malformed (`classifyModel` → `malformed`); `ID_FORMS` names `xai:<id>`; a model id merely containing `xai` without the prefix stays unprefixed
-- [ ] write tests: the key comes from the `xaiApiKey` option over `XAI_API_KEY`; env-only loading; missing key → `missingKeyMessage('xai')` names both
-- [ ] write tests for `targetFor` with an `xai` route: base URL `https://api.x.ai/v1`, bearer key, label `xai`, `reasoning` true for `grok-4.7` and `grok-4.7-latest`, false for `grok-4.20-0309-non-reasoning`, `grok-4.20-non-reasoning` and `grok-4.20-non-reasoning-latest`, `rejectsStop` follows `reasoning`, `effortScale` `xai`; missing key → the missing-key error
-- [ ] write tests for `toChat` on an xAI reasoning target: no `stop` even when the request has `stop_sequences`, no `temperature` / `top_p`, `reasoning_effort` `xhigh` for effort `xhigh` and `max`, `low`/`medium`/`high` as is, none for a number and none when effort is omitted; on an xAI non-reasoning target: `stop`, `temperature` and `top_p` kept, no `reasoning_effort`
-- [ ] widen `ChatRequest.reasoning_effort` to include `xhigh`, and forward `rejectsStop` and `effortScale` from the target through `complete()` into `toChat`; assert the serialized POST body through `complete()` (not only `toChat`)
-- [ ] write regression tests through `complete()` that `openai:` reasoning and non-reasoning requests and `custom:` requests (including a `custom:` endpoint serving a Grok model id) are byte-for-byte as before: `stop` kept, OpenAI effort mapping unchanged, no `xhigh`
-- [ ] write `routedStep` tests: an `xai:` step posts to `https://api.x.ai/v1/chat/completions` with `authorization: Bearer <fake key>` and the reply comes back as chunks; a malformed `xai:` id and an `xai:` step with no key each answer locally with zero engine and zero provider calls
-- [ ] implement the route, `KEY_SOURCES`, the literal `$.env.get('XAI_API_KEY')`, the `userConfig` field (plugin description lists `xai:`), `isXaiReasoningModel`, the `targetFor` branch and the `ChatOptions` / `OpenAITarget` fields
-- [ ] run tests, typecheck, validate - must pass before Task 2
+- [x] write tests: `parseModel('xai:grok-4.7')` → `{ provider: 'xai', model: 'grok-4.7' }`; ids with `/` and `:` after the prefix; `xai:` alone is malformed (`classifyModel` → `malformed`); `ID_FORMS` names `xai:<id>`; a model id merely containing `xai` without the prefix stays unprefixed
+- [x] write tests: the key comes from the `xaiApiKey` option over `XAI_API_KEY`; env-only loading; missing key → `missingKeyMessage('xai')` names both
+- [x] write tests for `targetFor` with an `xai` route: base URL `https://api.x.ai/v1`, bearer key, label `xai`, `reasoning` true for `grok-4.7` and `grok-4.7-latest`, false for `grok-4.20-0309-non-reasoning`, `grok-4.20-non-reasoning` and `grok-4.20-non-reasoning-latest`, `rejectsStop` follows `reasoning`, `effortScale` `xai`; missing key → the missing-key error
+- [x] write tests for `toChat` on an xAI reasoning target: no `stop` even when the request has `stop_sequences`, no `temperature` / `top_p`, `reasoning_effort` `xhigh` for effort `xhigh` and `max`, `low`/`medium`/`high` as is, none for a number and none when effort is omitted; on an xAI non-reasoning target: `stop`, `temperature` and `top_p` kept, no `reasoning_effort`
+- [x] widen `ChatRequest.reasoning_effort` to include `xhigh`, and forward `rejectsStop` and `effortScale` from the target through `complete()` into `toChat`; assert the serialized POST body through `complete()` (not only `toChat`)
+- [x] write regression tests through `complete()` that `openai:` reasoning and non-reasoning requests and `custom:` requests (including a `custom:` endpoint serving a Grok model id) are byte-for-byte as before: `stop` kept, OpenAI effort mapping unchanged, no `xhigh`
+- [x] write `routedStep` tests: an `xai:` step posts to `https://api.x.ai/v1/chat/completions` with `authorization: Bearer <fake key>` and the reply comes back as chunks; a malformed `xai:` id and an `xai:` step with no key each answer locally with zero engine and zero provider calls
+- [x] implement the route, `KEY_SOURCES`, the literal `$.env.get('XAI_API_KEY')`, the `userConfig` field (plugin description lists `xai:`), `isXaiReasoningModel`, the `targetFor` branch and the `ChatOptions` / `OpenAITarget` fields
+- [x] run tests, typecheck, validate - must pass before Task 2
 
 ### Task 2: Limits, `/providers` and secrets
 
