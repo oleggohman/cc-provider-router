@@ -75,7 +75,9 @@ are in `README.md`; the engine behaviour the design depends on is in
 ## Adding a provider
 
 - Anthropic-compatible: a row in `ANTHROPIC_ROWS` (`hooks/providers/anthropic.ts`).
-  OpenAI-compatible: a branch in `targetFor` (`hooks/providers/openai.ts`).
+  OpenAI-compatible: a branch in `targetFor` (`hooks/providers/openai.ts`). An
+  endpoint quirk goes in the `OpenAITarget` fields (`rejectsStop`,
+  `effortScale`), passed through `ChatOptions` to `toChat`, as xAI does.
 - Its prefix in `SimpleProvider` and `SIMPLE` (`hooks/route.ts`; error text and
   `KeyedProvider` follow) and the dispatch in `routedStep`.
 - Key: `KEY_SOURCES` plus a literal `$.env.get('<NAME>')` in `loadConfig`
@@ -101,7 +103,7 @@ test files; those are known and not failures.
 `.claude-plugin/types/` is generated on first load and git-ignored.
 
 `scripts/smoke.sh` reads `ROUTER_ANTHROPIC_API_KEY`, `ZAI_API_KEY`,
-`OPENAI_API_KEY`, and for a custom endpoint `SMOKE_CUSTOM_URL`,
+`OPENAI_API_KEY`, `XAI_API_KEY`, and for a custom endpoint `SMOKE_CUSTOM_URL`,
 `SMOKE_CUSTOM_NAME`, `SMOKE_CUSTOM_MODEL`, `ROUTER_CUSTOM_API_KEYS`; see its
 header for the rest. It passes plugin options via `--settings` with
 `pluginConfigs["provider-router@inline"]`.

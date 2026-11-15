@@ -6,11 +6,12 @@
 #   ROUTER_ANTHROPIC_API_KEY  -> anthropic:<id>
 #   ZAI_API_KEY               -> zai:<id>
 #   OPENAI_API_KEY            -> openai:<id>
+#   XAI_API_KEY               -> xai:<id>
 #   SMOKE_CUSTOM_URL          -> custom:<name>:<id> (OpenAI-compatible base URL,
 #                                e.g. http://host:4000/v1); key, if any, via
 #                                ROUTER_CUSTOM_API_KEYS="<name>=<key>"
 # Optional: SMOKE_ANTHROPIC_MODEL, SMOKE_ZAI_MODEL, SMOKE_OPENAI_MODEL,
-#   SMOKE_CUSTOM_NAME (default smoke), SMOKE_CUSTOM_MODEL (required with the URL),
+#   SMOKE_XAI_MODEL, SMOKE_CUSTOM_NAME (default smoke), SMOKE_CUSTOM_MODEL (required with the URL),
 #   SMOKE_MAIN_MODEL (main-on-subscription model for the subagent cases and
 #   the switch case's middle turn; default: your default model, `haiku` for
 #   switch), SMOKE_CASES (space-separated subset of: main turns switch sub
@@ -42,6 +43,7 @@ SHADOW=provider-router-shadow
 ANTHROPIC_MODEL="${SMOKE_ANTHROPIC_MODEL:-claude-haiku-5-5}"
 ZAI_MODEL="${SMOKE_ZAI_MODEL:-glm-5.3}"
 OPENAI_MODEL="${SMOKE_OPENAI_MODEL:-gpt-5-mini}"
+XAI_MODEL="${SMOKE_XAI_MODEL:-grok-4.7}"
 CUSTOM_NAME="${SMOKE_CUSTOM_NAME:-smoke}"
 CUSTOM_URL="${SMOKE_CUSTOM_URL:-}"
 CUSTOM_MODEL="${SMOKE_CUSTOM_MODEL:-}"
@@ -65,6 +67,7 @@ PROVIDERS=()
 [ -n "${ROUTER_ANTHROPIC_API_KEY:-}" ] && PROVIDERS+=("anthropic anthropic:$ANTHROPIC_MODEL") || skip anthropic "ROUTER_ANTHROPIC_API_KEY not set"
 [ -n "${ZAI_API_KEY:-}" ] && PROVIDERS+=("zai zai:$ZAI_MODEL") || skip zai "ZAI_API_KEY not set"
 [ -n "${OPENAI_API_KEY:-}" ] && PROVIDERS+=("openai openai:$OPENAI_MODEL") || skip openai "OPENAI_API_KEY not set"
+[ -n "${XAI_API_KEY:-}" ] && PROVIDERS+=("xai xai:$XAI_MODEL") || skip xai "XAI_API_KEY not set"
 if [ -n "$CUSTOM_URL" ] && [ -n "$CUSTOM_MODEL" ]; then
   PROVIDERS+=("custom custom:$CUSTOM_NAME:$CUSTOM_MODEL")
 else

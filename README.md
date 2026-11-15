@@ -1,10 +1,11 @@
 # Provider Router for Claude Code
 
-Use OpenAI, Z.ai (GLM), the Anthropic Platform API or any OpenAI-compatible
-server from inside Claude Code, without giving up your Claude subscription.
-Provider Router is a Claude Code plugin that routes each model request by the
-prefix of its model id: `zai:glm-5.3`, `openai:gpt-5`, `anthropic:claude-opus-4-6`
-or `custom:<name>:<model>` go to that provider with your API key, and every
+Use OpenAI, Z.ai (GLM), xAI (Grok), the Anthropic Platform API or any
+OpenAI-compatible server from inside Claude Code, without giving up your Claude
+subscription. Provider Router is a Claude Code plugin that routes each model
+request by the prefix of its model id: `zai:glm-5.3`, `openai:gpt-5`,
+`xai:grok-4.7`, `anthropic:claude-opus-4-6` or `custom:<name>:<model>` go to
+that provider with your API key, and every
 unprefixed model (`opus`, `sonnet`, `haiku`, ...) stays on your signed-in
 subscription. The main session can stay on Claude while a subagent works on
 GLM or GPT, in parallel, in the same session. It runs on unmodified Claude Code
@@ -24,6 +25,7 @@ releases: no fork, no proxy server, no `ANTHROPIC_BASE_URL` tricks.
    ```bash
    export ZAI_API_KEY=...                              # for zai:<model>
    # or: export OPENAI_API_KEY=sk-...                  # for openai:<model>
+   # or: export XAI_API_KEY=...                        # for xai:<model>
    # or: export ROUTER_ANTHROPIC_API_KEY=sk-ant-...    # for anthropic:<model>
    ```
 
@@ -91,6 +93,7 @@ Claude Code's secure storage.
 | `anthropic:` | Anthropic Platform (`https://api.anthropic.com`) | `ROUTER_ANTHROPIC_API_KEY` | `anthropicApiKey` |
 | `openai:` | OpenAI Platform (`https://api.openai.com/v1`) | `OPENAI_API_KEY` | `openaiApiKey` |
 | `zai:` | Z.ai, Anthropic-compatible endpoint (`https://api.z.ai/api/anthropic`) | `ZAI_API_KEY` | `zaiApiKey` |
+| `xai:` | xAI, Chat Completions (`https://api.x.ai/v1`) | `XAI_API_KEY` | `xaiApiKey` |
 | `custom:<name>:` | an OpenAI-compatible endpoint you add | `ROUTER_CUSTOM_API_KEYS` | - |
 
 ### Custom endpoints
@@ -162,7 +165,8 @@ ids such as `openai:gpt-5.1` or `anthropic:claude-sonnet-4-6` are covered):
 `openai:gpt-5*` (400K; `gpt-5-chat*` 128K), `openai:gpt-4.1*` (~1M),
 `openai:gpt-4o*` (128K), `openai:o1*`, `o3*`, `o4-mini*` (200K; `o1-mini` 128K),
 `anthropic:claude-opus*`, `claude-sonnet*`, `claude-haiku*` (200K),
-`zai:glm*` (200K; `glm-4.5*` 128K). It compacts a routed main session after a
+`zai:glm*` (200K; `glm-4.5*` 128K), `xai:grok-4*` (500K; `grok-4.20*` and
+`grok-4.3*` 1M), `xai:grok-build*` (256K). It compacts a routed main session after a
 turn that used 85% of the input room: the window less the model's output
 limit (below), which every request reserves, so `openai:gpt-5` compacts at
 about 231K input tokens, not 340K. Automatic compaction needs an interactive
@@ -195,6 +199,7 @@ URL with credentials in it, `https://user:pass@...`: put the key in
 anthropic:<model>         anthropic:claude-opus-4-6
 openai:<model>            openai:gpt-5
 zai:<model>               zai:glm-5.3
+xai:<model>               xai:grok-4.7
 custom:<name>:<model>     custom:litellm:my-model, custom:ollama:qwen3:32b
 anything else             your Claude subscription, untouched
 ```
@@ -253,7 +258,7 @@ also in the background while the main session keeps working.
                                   3. send it to the provider with your key
                                         |                     |
                              Anthropic Messages API   OpenAI Chat Completions
-                             anthropic:, zai:         openai:, custom:<name>:
+                             anthropic:, zai:         openai:, xai:, custom:<name>:
                              (as is)                  (translated both ways)
                                         |                     |
                                   4. reply -> text and tool-call chunks;
@@ -277,11 +282,21 @@ a Claude ..." is sent as written.
 - **No streaming** for routed models: a reply appears when it is complete.
 - **No extended thinking on any routed model**, and `effort` is ignored,
   except that it becomes `reasoning_effort` for OpenAI reasoning models (`o*`,
-  `gpt-5*` except `gpt-5-chat*`). Thinking blocks in a reply are dropped.
+  `gpt-5*` except `gpt-5-chat*`) and for xAI reasoning models (every `grok`
+  id except `*non-reasoning*`). On xAI, `xhigh` and `max` are sent as `xhigh`,
+  and `low`, `medium` and `high` as they are. Thinking blocks in a reply are
+  dropped.
+- **Reasoning models drop sampling settings.** On OpenAI and xAI reasoning
+  models `temperature` and `top_p` are not sent. xAI reasoning models also
+  drop `stop` sequences, because xAI rejects them with an error.
+- **xAI uses Chat Completions.** xAI's Anthropic-compatible endpoint is
+  deprecated, so `xai:` goes to its OpenAI-compatible Chat Completions API
+  (documented by xAI as legacy next to its Responses API). A Responses adapter
+  is a possible follow-up.
 - **Prompt caching and server tools** (web search, code execution): the
   request's cache breakpoints and tool definitions are passed to `anthropic:`
   and `zai:` as Claude Code wrote them (at most 4 breakpoints), so whether
-  they work is up to the provider; not verified live. On `openai:` and
+  they work is up to the provider; not verified live. On `openai:`, `xai:` and
   `custom:` neither is translated.
 - **Deferred tools** (tool search): a deferred tool is sent once it has been
   loaded; until then it is left out, on every provider.
@@ -289,7 +304,9 @@ a Claude ..." is sent as written.
   `openai:gpt-5*` 128000 (`gpt-5-chat*` 16384), `openai:gpt-4.1*` 32768,
   `openai:gpt-4o*` 16384, `openai:o1*` / `o3*` / `o4-mini*` 100000
   (`o1-mini` 65536), `anthropic:claude-opus*` 32000,
-  `anthropic:claude-sonnet*` / `claude-haiku*` 64000, `zai:glm*` 32768.
+  `anthropic:claude-sonnet*` / `claude-haiku*` 64000, `zai:glm*` 32768,
+  `xai:grok-4*` and `xai:grok-build*` 32768. The xAI value is an assumption:
+  xAI publishes no maximum output size, so a smoke run is the only check.
   Everything else, including every `custom:` model, gets 8192, which is not
   configurable: a very long file write on such a model can stop at the limit.
 - **Esc does not cancel a call already sent.** The step ends at once, but the
@@ -345,6 +362,7 @@ a Claude ..." is sent as written.
 | custom: LiteLLM proxy with a key | live-verified, same cases |
 | Anthropic Platform (`anthropic:`) | unit-tested; requests reach the API and `/providers models` works, but no full live run at release |
 | OpenAI Platform (`openai:`) | unit-tested only; not live-verified at release |
+| xAI (`xai:`) | unit-tested only; not live-verified at release |
 
 Not yet checked by hand in an interactive session: Esc during a routed step,
 automatic compaction of a routed main session, `/rewind` in a routed
@@ -409,6 +427,7 @@ runs only when its key is set:
 ```bash
 ZAI_API_KEY=... scripts/smoke.sh
 OPENAI_API_KEY=sk-... SMOKE_ONLY=openai scripts/smoke.sh
+XAI_API_KEY=... SMOKE_ONLY=xai scripts/smoke.sh
 SMOKE_CUSTOM_URL=http://localhost:4000/v1 SMOKE_CUSTOM_NAME=litellm \
   SMOKE_CUSTOM_MODEL=my-model ROUTER_CUSTOM_API_KEYS="litellm=sk-..." scripts/smoke.sh
 ```
@@ -417,9 +436,9 @@ Requirements: `claude`, `jq`, and `timeout` (GNU coreutils; on macOS
 `brew install coreutils` provides `gtimeout`, which the script uses). Other
 settings: `SMOKE_CASES` (any of `main turns switch sub parallel background
 errors`; default all), `SMOKE_ONLY` (provider labels: `anthropic zai openai
-custom`), `SMOKE_ANTHROPIC_MODEL` (default `claude-haiku-5-5`),
+xai custom`), `SMOKE_ANTHROPIC_MODEL` (default `claude-haiku-5-5`),
 `SMOKE_ZAI_MODEL` (default `glm-5.3`), `SMOKE_OPENAI_MODEL` (default
-`gpt-5-mini`), `SMOKE_CUSTOM_NAME` (default `smoke`), `SMOKE_MAIN_MODEL` (the
+`gpt-5-mini`), `SMOKE_XAI_MODEL` (default `grok-4.7`), `SMOKE_CUSTOM_NAME` (default `smoke`), `SMOKE_MAIN_MODEL` (the
 subscription model for the subagent and switch cases; default your default
 model), `SMOKE_TIMEOUT` (seconds per session, default 600), `SMOKE_KEEP=1`.
 Transcripts are read from `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`.
