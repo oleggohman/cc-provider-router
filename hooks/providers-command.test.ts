@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { LIST_TIMEOUT_MS, listModels, providersCommand, statusText } from './providers-command.ts'
-import { cfg, provider } from '../tests/harness.ts'
+import { cfg, provider, sleeper } from '../tests/harness.ts'
 
 // The command takes a fetch function; tests pass a stand-in. No live
 // provider is ever called, and no listing happens unless asked for.
@@ -57,14 +57,14 @@ describe('statusText', () => {
 describe('providersCommand', () => {
   test('without args: status only, no network', async () => {
     const p = provider([{ status: 500, text: '' }])
-    const t = await providersCommand('', full(), p.fetch, STATS)
+    const t = await providersCommand('', full(), p.fetch, STATS, sleeper().sleep)
     expect(p.calls.length).toBe(0)
     expect(t).toContain('shadowLeaks 0')
   })
 
   test('unknown argument: usage line, no network', async () => {
     const p = provider([{ status: 500, text: '' }])
-    const t = await providersCommand('bogus', full(), p.fetch, STATS)
+    const t = await providersCommand('bogus', full(), p.fetch, STATS, sleeper().sleep)
     expect(p.calls.length).toBe(0)
     expect(t).toContain('usage: /providers [models]')
   })
@@ -77,7 +77,7 @@ describe('providersCommand', () => {
       if (url.startsWith('http://gateway.example.internal')) return { status: 200, text: openaiList(['llama-3']) }
       return { status: 200, text: openaiList(['qwen']) }
     })
-    const t = await providersCommand('models', full(), p.fetch, STATS)
+    const t = await providersCommand('models', full(), p.fetch, STATS, sleeper().sleep)
     const byUrl = new Map(p.calls.map(c => [c.url, c.init]))
     const an = byUrl.get('https://api.anthropic.com/v1/models?limit=1000')!
     expect(an.method).toBe('GET')
@@ -102,7 +102,7 @@ describe('providersCommand', () => {
 
   test('models: a provider without a key is skipped, not called', async () => {
     const p = provider([{ status: 200, text: openaiList(['gpt-5']) }])
-    const t = await listModels(p.fetch, cfg({ openai: OA }))
+    const t = await listModels(p.fetch, cfg({ openai: OA }), sleeper().sleep)
     expect(p.calls.map(c => c.url)).toEqual(['https://api.openai.com/v1/models'])
     expect(t).toMatch(/anthropic: skipped \(no key\)/)
     expect(t).toMatch(/zai: skipped \(no key\)/)
@@ -110,7 +110,7 @@ describe('providersCommand', () => {
 
   test('models: no provider usable says how to add one', async () => {
     const p = provider([{ status: 200, text: '' }])
-    const t = await listModels(p.fetch, cfg({}))
+    const t = await listModels(p.fetch, cfg({}), sleeper().sleep)
     expect(p.calls.length).toBe(0)
     expect(t).toContain('no provider has a key')
   })
@@ -122,7 +122,7 @@ describe('providersCommand', () => {
       if (url.includes('z.ai')) return new Error(`connect ECONNREFUSED (key ${ZA})`)
       return { status: 200, text: 'not json' }
     })
-    const t = await listModels(p.fetch, full())
+    const t = await listModels(p.fetch, full(), sleeper().sleep)
     expect(t).toContain('[provider-router] anthropic error 503')
     expect(t).toContain('[provider-router] openai error 401')
     expect(t).toContain('[provider-router] zai error')

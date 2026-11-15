@@ -7,8 +7,9 @@
 // Never uses `$.session.authorize()` / `init.auth`: these routes bill the
 // configured key, never the signed-in subscription.
 
-import { type Reply, type ReplyBlock, type Usage, normalizeStop } from '../chunks.ts'
-import { type ErrorReply, localError, providerError } from '../errors.ts'
+import type { AdapterResult, Fetch } from '../call.ts'
+import { type Reply, type ReplyBlock, type Usage, normalizeStop, num } from '../chunks.ts'
+import { localError, providerError } from '../errors.ts'
 import type { ProviderRequest } from '../request.ts'
 
 export const ANTHROPIC_VERSION = '2023-06-01'
@@ -19,16 +20,6 @@ export const ANTHROPIC_ROWS = {
   anthropic: { label: 'anthropic', baseUrl: 'https://api.anthropic.com', auth: 'x-api-key' },
   zai: { label: 'zai', baseUrl: 'https://api.z.ai/api/anthropic', auth: 'bearer' },
 } as const satisfies Record<string, AnthropicRow>
-
-export type FetchInit = { method: string; headers: Record<string, string>; body: string }
-export type FetchResponse = { status: number; ok: boolean; text: string }
-export type Fetch = (url: string, init: FetchInit) => Promise<FetchResponse>
-
-export type AdapterResult = { ok: true; reply: Reply } | { ok: false; error: ErrorReply }
-
-function num(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : 0
-}
 
 function usageOf(u: any): Usage {
   return {
@@ -71,11 +62,12 @@ export function authHeader(auth: AnthropicRow['auth'], key: string): Record<stri
   return auth === 'bearer' ? { authorization: `Bearer ${key}` } : { 'x-api-key': key }
 }
 
-export async function complete(fetch: Fetch, req: ProviderRequest, row: AnthropicRow, key: string): Promise<AdapterResult> {
+// `secrets`: every configured key, redacted from error text.
+export async function complete(fetch: Fetch, req: ProviderRequest, row: AnthropicRow, key: string, secrets: readonly string[]): Promise<AdapterResult> {
   const headers: Record<string, string> = { 'content-type': 'application/json', 'anthropic-version': ANTHROPIC_VERSION, ...authHeader(row.auth, key) }
   const res = await fetch(`${row.baseUrl}/v1/messages`, { method: 'POST', headers, body: JSON.stringify(req) })
-  if (!res.ok) return { ok: false, error: providerError(row.label, res.status, res.text, [key]) }
+  if (!res.ok) return { ok: false, error: providerError(row.label, res.status, res.text, secrets) }
   const reply = parseMessage(res.text, req.model)
-  if (!reply) return { ok: false, error: localError(row.label, `unreadable reply (status ${res.status}, not a Messages API message)`, [key]) }
+  if (!reply) return { ok: false, error: localError(row.label, `unreadable reply (status ${res.status}, not a Messages API message)`, secrets) }
   return { ok: true, reply }
 }

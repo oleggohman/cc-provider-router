@@ -10,7 +10,18 @@
 // `$.http.fetch` does not use up the hook's 10 s budget (25 s fetch won over
 // a 60 s timer; a 15 s timer won over a 25 s fetch).
 
+import type { Reply } from './chunks.ts'
+import type { ErrorReply } from './errors.ts'
+
 export const DEFAULT_TIMEOUT_MS = 600_000
+
+// What an adapter sends through `$.http.fetch` and gets back.
+export type FetchInit = { method: string; headers: Record<string, string>; body: string }
+export type FetchResponse = { status: number; ok: boolean; text: string }
+export type Fetch = (url: string, init: FetchInit) => Promise<FetchResponse>
+
+// An adapter's answer: the provider's reply, or the error reply to show.
+export type AdapterResult = { ok: true; reply: Reply } | { ok: false; error: ErrorReply }
 
 export type Sleep = (ms: number, options?: { signal?: AbortSignal }) => Promise<void>
 

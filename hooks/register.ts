@@ -1,29 +1,42 @@
+// The plugin's hooks module: registers the `http.fetch` shadow capture, the
+// routed `turn.step`, compaction on `turn.complete`, and `/providers`; and
+// `routedStep`, one routed step from shadow capture to provider reply.
+
 import type { Register } from 'claude-code'
-import { raceCall, type Sleep } from './call.ts'
+import { raceCall, type AdapterResult, type Fetch, type Sleep } from './call.ts'
 import { toChunks, toResult } from './chunks.ts'
 import { loadConfig, missingKeyMessage, secretsOf, type Config } from './config.ts'
 import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
-import { errorChunks, localError, sanitize } from './errors.ts'
+import { PREFIX, errorChunks, localError, sanitize } from './errors.ts'
 import { maxOutputTokens } from './limits.ts'
-import { ANTHROPIC_ROWS, complete as anthropicComplete, type AdapterResult, type Fetch } from './providers/anthropic.ts'
+import { ANTHROPIC_ROWS, complete as anthropicComplete } from './providers/anthropic.ts'
 import { complete as openaiComplete, targetFor } from './providers/openai.ts'
-import { buildRequest, type ProviderRequest } from './request.ts'
 import { providersCommand } from './providers-command.ts'
-import { malformedPrefix, parseModel, type Route } from './route.ts'
+import { buildRequest, type ProviderRequest } from './request.ts'
+import { ID_FORMS, classifyModel, prefixOf, routeLabel, type Route } from './route.ts'
 import { loopKeyOf, shadowFetch, shadowFetchFailed, shadowStats, shadowStep, type ShadowStepEvent } from './shadow.ts'
 import { dropBase, normalizeBody, recordStep, resolveThread, type Recovery, type Threads } from './thread.ts'
 
-function label(r: Route): string {
-  return r.provider === 'custom' ? `custom:${r.name}` : r.provider
-}
-
-// The prefix of a model id, as the label of an error about it.
-function prefixOf(model: string): string {
-  return model.slice(0, Math.max(0, model.indexOf(':'))) || 'router'
-}
-
 // What the router keeps per loop between steps.
 export type LoopState = { usage: UsageMap; threads: Threads }
+
+type StepEvent = ShadowStepEvent & { turnId: string; index: number; effort?: string | number }
+
+// What a routed step needs from `$` and `next`; tests pass stand-ins (the
+// test kit refuses `$.http.fetch` from a test's own hooks). `history` reads
+// the loop's conversation from the session (see thread.ts Recovery);
+// `agents` the session's agents, to tell a fork from a subagent.
+export type StepIO = {
+  fetch: Fetch
+  sleep: Sleep
+  signal: AbortSignal
+  timeoutMs?: number
+  history?: () => Promise<any[] | undefined>
+  agents?: () => Promise<AgentRef[] | undefined>
+}
+
+// What forkedLoop reads of a `$.agent.list()` entry.
+export type AgentRef = { id: string; type?: string; parentId?: string }
 
 // Back on the subscription: the engine tracks this loop's context and thread.
 export function onUnprefixedStep(s: LoopState, agentId: string | undefined): void {
@@ -88,9 +101,8 @@ export const register: Register = (on, options) => {
   on('http.fetch', async (_$, e, next) => shadowFetch(e, next) as any).catch((_$, e, next) => shadowFetchFailed(e, next) as any)
 
   on('turn.step', async function* ($, e, next) {
-    const route = parseModel(e.model)
-    const bad = route ? undefined : malformedPrefix(e.model)
-    if (!route && !bad) {
+    const model = classifyModel(e.model)
+    if (model.kind === 'unprefixed') {
       onUnprefixedStep(state, e.agentId)
       return yield* next(e)
     }
@@ -99,9 +111,9 @@ export const register: Register = (on, options) => {
     const key = loopKeyOf(e.agentId)
     let secrets: string[] = []
     try {
-      if (!route) {
+      if (model.kind === 'malformed') {
         dropBase(state.threads, key)
-        return yield* errorChunks(e, localError(bad!, `malformed model id "${e.model}": use anthropic:<id>, openai:<id>, zai:<id> or custom:<name>:<id>`))
+        return yield* errorChunks(e, localError(model.prefix, `malformed model id "${e.model}": use ${ID_FORMS}`))
       }
       const cfg = await cachedConfig($, options, cache)
       secrets = secretsOf(cfg)
@@ -112,7 +124,7 @@ export const register: Register = (on, options) => {
         history: () => readHistory($, e.agentId),
         agents: () => readAgents($),
       }
-      const result = yield* routedStep(e, next, route, cfg, io, state.threads)
+      const result = yield* routedStep(e, next, model.route, cfg, io, state.threads)
       recordUsage(state.usage, key, e.model, result?.usage)
       return result
     } catch (err) {
@@ -122,7 +134,7 @@ export const register: Register = (on, options) => {
   }).catch(async function* (_$, e, next) {
     // The hook itself failed (threw past its own catch, or overran): a routed
     // model still never reaches the engine.
-    if (!parseModel(e.model) && !malformedPrefix(e.model)) return yield* next(e)
+    if (classifyModel(e.model).kind === 'unprefixed') return yield* next(e)
     return yield* errorChunks(e, localError(prefixOf(e.model), `internal error: ${next.error.message ?? next.error.kind}`))
   })
 
@@ -164,28 +176,10 @@ export const register: Register = (on, options) => {
       const text = await providersCommand(e.args ?? '', cfg, (url, init) => $.http.fetch(url, init), shadowStats(), (ms, opts) => $.clock.sleep(ms, opts))
       return { text }
     } catch (err) {
-      return { text: sanitize(`[provider-router] /providers failed: ${String(err)}`, secrets) }
+      return { text: sanitize(`${PREFIX} /providers failed: ${String(err)}`, secrets) }
     }
   })
 }
-
-type StepEvent = ShadowStepEvent & { turnId: string; index: number; effort?: string | number }
-
-// What a routed step needs from `$` and `next`; tests pass stand-ins (the
-// test kit refuses `$.http.fetch` from a test's own hooks). `history` reads
-// the loop's conversation from the session (see thread.ts Recovery);
-// `agents` the session's agents, to tell a fork from a subagent.
-export type StepIO = {
-  fetch: Fetch
-  sleep: Sleep
-  signal: AbortSignal
-  timeoutMs?: number
-  history?: () => Promise<any[] | undefined>
-  agents?: () => Promise<AgentRef[] | undefined>
-}
-
-// What forkedLoop reads of a `$.agent.list()` entry.
-export type AgentRef = { id: string; type?: string; parentId?: string }
 
 // The step ended by Esc: no chunks, no error text, no response.
 function cancelled(e: { turnId: string; index: number }) {
@@ -243,7 +237,7 @@ export async function* routedStep<E extends StepEvent>(
   threads: Threads,
 ): AsyncGenerator<any, any, unknown> {
   const secrets = secretsOf(cfg)
-  const name = label(route)
+  const name = routeLabel(route)
   const key = loopKeyOf(e.agentId)
   const early = (message: string) => {
     dropBase(threads, key)
@@ -256,11 +250,11 @@ export async function* routedStep<E extends StepEvent>(
     const row = ANTHROPIC_ROWS[route.provider]
     const apiKey = cfg.keys[route.provider]
     if (!apiKey) return yield* early(missingKeyMessage(route.provider))
-    send = request => anthropicComplete(io.fetch, request, row, apiKey)
+    send = request => anthropicComplete(io.fetch, request, row, apiKey, secrets)
   } else {
     const t = targetFor(route, cfg)
     if (!t.ok) return yield* early(t.message)
-    send = request => openaiComplete(io.fetch, request, e.effort, t.target)
+    send = request => openaiComplete(io.fetch, request, e.effort, t.target, secrets)
   }
   let body: any
   try {

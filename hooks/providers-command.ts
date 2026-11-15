@@ -3,11 +3,12 @@
 // (`/providers models`) each provider's model list from `GET /v1/models`.
 // No discovery at session start, no cache, no status line.
 
-import { raceCall, type Sleep } from './call.ts'
+import { raceCall, type FetchResponse, type Sleep } from './call.ts'
 import { KEY_SOURCES, secretsOf, type Config, type KeyedProvider } from './config.ts'
 import { localError, providerError, redact } from './errors.ts'
-import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, authHeader, type AnthropicRow, type FetchResponse } from './providers/anthropic.ts'
+import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, authHeader, type AnthropicRow } from './providers/anthropic.ts'
 import { OPENAI_BASE } from './providers/openai.ts'
+import { customLabel } from './route.ts'
 
 export type ListFetch = (url: string, init: { method: 'GET'; headers: Record<string, string> }) => Promise<FetchResponse>
 
@@ -32,7 +33,7 @@ function rows(cfg: Config): Row[] {
     { label: 'openai', baseUrl: OPENAI_BASE, key: cfg.keys.openai, keyed: 'openai' },
     { label: 'zai', baseUrl: ANTHROPIC_ROWS.zai.baseUrl, key: cfg.keys.zai, keyed: 'zai', anthropic: ANTHROPIC_ROWS.zai },
   ]
-  for (const [name, ep] of cfg.custom) out.push({ label: `custom:${name}`, baseUrl: ep.url, key: ep.key })
+  for (const [name, ep] of cfg.custom) out.push({ label: customLabel(name), baseUrl: ep.url, key: ep.key })
   return out
 }
 
@@ -97,28 +98,34 @@ async function listOne(fetch: ListFetch, r: Row, secrets: string[]): Promise<str
 }
 
 // One provider's list, or a line saying it did not answer in time (one
-// hanging endpoint must not stall the command). Without `sleep`, no timer.
-async function listWithin(fetch: ListFetch, r: Row, secrets: string[], sleep: Sleep | undefined): Promise<string> {
-  if (!sleep) return listOne(fetch, r, secrets)
+// hanging endpoint must not stall the command).
+async function listWithin(fetch: ListFetch, r: Row, secrets: string[], sleep: Sleep): Promise<string> {
+  // Nothing aborts this signal, so the outcome is never 'cancelled'.
   const out = await raceCall(sleep, new AbortController().signal, () => listOne(fetch, r, secrets), LIST_TIMEOUT_MS)
   if (out.kind === 'done') return out.value
-  if (out.kind === 'timeout') return `${r.label}: no answer within ${Math.round(out.ms / 1000)} s`
-  return localError(r.label, `unreachable: ${out.kind === 'failed' ? String(out.error) : 'cancelled'}`, secrets).text
+  if (out.kind === 'failed') return localError(r.label, `unreachable: ${String(out.error)}`, secrets).text
+  return `${r.label}: no answer within ${Math.round(LIST_TIMEOUT_MS / 1000)} s`
+}
+
+// The env names of the built-in keys, as a list in prose.
+function keyEnvNames(): string {
+  const names = Object.values(KEY_SOURCES).map(s => s.env)
+  return `${names.slice(0, -1).join(', ')} or ${names.at(-1)}`
 }
 
 // Every provider's models, fetched now (no cache). Providers without a key
 // are skipped, not called.
-export async function listModels(fetch: ListFetch, cfg: Config, sleep?: Sleep): Promise<string> {
+export async function listModels(fetch: ListFetch, cfg: Config, sleep: Sleep): Promise<string> {
   const list = rows(cfg)
   if (!list.some(r => r.key || !r.keyed)) {
-    return 'no provider has a key: set OPENAI_API_KEY, ROUTER_ANTHROPIC_API_KEY or ZAI_API_KEY (or the /config fields), or add a custom endpoint'
+    return `no provider has a key: set ${keyEnvNames()} (or the /config fields), or add a custom endpoint`
   }
   const secrets = secretsOf(cfg)
   const parts = await Promise.all(list.map(r => listWithin(fetch, r, secrets, sleep)))
   return parts.join('\n')
 }
 
-export async function providersCommand(args: string, cfg: Config, fetch: ListFetch, stats: ShadowCounters, sleep?: Sleep): Promise<string> {
+export async function providersCommand(args: string, cfg: Config, fetch: ListFetch, stats: ShadowCounters, sleep: Sleep): Promise<string> {
   const a = args.trim().toLowerCase()
   if (a === '') return statusText(cfg, stats)
   if (a === 'models') return `${statusText(cfg, stats)}\n\n${await listModels(fetch, cfg, sleep)}`

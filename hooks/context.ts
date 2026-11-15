@@ -11,25 +11,26 @@
 // `autoCompactWindow` is the knob (README), plus a clear message when a
 // provider says the context is too long.
 
+import { num } from './chunks.ts'
 import type { ErrorReply } from './errors.ts'
 import { windowFor } from './limits.ts'
+import { loopKeyOf } from './shadow.ts'
 
 export const COMPACT_AT = 0.85
-
-const MAIN = 'main'
 
 // Last routed input size per loop key: what the next request starts from.
 export type LoopUsage = { model: string; inputTokens: number }
 export type UsageMap = Map<string, LoopUsage>
 
-function num(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0
+// A usage count, negatives as 0.
+function positive(v: unknown): number {
+  return Math.max(0, num(v))
 }
 
-export function inputTokensOf(usage: unknown): number {
+function inputTokensOf(usage: unknown): number {
   if (!usage || typeof usage !== 'object') return 0
   const u = usage as Record<string, unknown>
-  return num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens)
+  return positive(u.input_tokens) + positive(u.cache_read_input_tokens) + positive(u.cache_creation_input_tokens)
 }
 
 // Records a routed step's input size for its loop. A step without an input
@@ -50,11 +51,12 @@ export type CompactDeps = {
 // cleared once acted on, so a skipped (`{ skip }`) or failed compaction is not
 // retried for the same usage; the next routed step records afresh.
 export function maybeCompact(map: UsageMap, windows: ReadonlyMap<string, number>, deps: CompactDeps): boolean {
-  const rec = map.get(MAIN)
+  const main = loopKeyOf(undefined)
+  const rec = map.get(main)
   if (!rec) return false
   const window = windowFor(rec.model, windows)
   if (!window || rec.inputTokens < window * COMPACT_AT) return false
-  map.delete(MAIN)
+  map.delete(main)
   const run = async () => {
     try {
       // A `{ skip }` answer is a veto: accepted as is.

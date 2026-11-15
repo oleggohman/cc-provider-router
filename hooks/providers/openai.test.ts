@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { OPENAI_BASE, complete, isReasoningModel, targetFor } from './openai.ts'
 import { routedStep } from '../register.ts'
-import { SHADOW_MODEL, resetShadow, shadowFetch, shadowStats } from '../shadow.ts'
+import { SHADOW_MODEL, resetShadow, shadowStats } from '../shadow.ts'
+import { cfg, drain, engine as sharedEngine, provider, sleeper, step } from '../../tests/harness.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the adapter
 // takes a fetch function and the tests pass a counting stand-in for the
@@ -9,18 +10,6 @@ import { SHADOW_MODEL, resetShadow, shadowFetch, shadowStats } from '../shadow.t
 
 const KEY = 'sk-proj-test-KEY-0123456789abcdef'
 const GW_KEY = 'gw-secret-key-0123456789abcdef'
-
-type Answer = { status: number; text: string }
-
-function provider(answers: Answer[]) {
-  const calls: { url: string; init: any }[] = []
-  const fetch = async (url: string, init: any) => {
-    calls.push({ url, init })
-    const a = answers[calls.length - 1] ?? answers[answers.length - 1]!
-    return { status: a.status, ok: a.status >= 200 && a.status < 300, headers: { 'content-type': 'application/json' }, text: a.text }
-  }
-  return { calls, fetch }
-}
 
 const REQ = {
   model: 'gpt-5',
@@ -55,7 +44,7 @@ const OPENAI_T = { label: 'openai', baseUrl: OPENAI_BASE, key: KEY, reasoning: t
 describe('openai adapter', () => {
   test('success: POST <base>/chat/completions with Bearer key; Chat body; reply parsed', async () => {
     const p = provider([{ status: 200, text: OK_TEXT }])
-    const r = await complete(p.fetch, REQ, 'medium', OPENAI_T)
+    const r = await complete(p.fetch, REQ, 'medium', OPENAI_T, [KEY])
     expect(p.calls.length).toBe(1)
     const { url, init } = p.calls[0]!
     expect(url).toBe('https://api.openai.com/v1/chat/completions')
@@ -87,7 +76,7 @@ describe('openai adapter', () => {
 
   test('tool call reply', async () => {
     const p = provider([{ status: 200, text: TOOL_TEXT }])
-    const r = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    const r = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY])
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.reply.content).toEqual([
@@ -99,7 +88,7 @@ describe('openai adapter', () => {
 
   test('401: clear error, refusal stop, the key never echoed', async () => {
     const p = provider([{ status: 401, text: JSON.stringify({ error: { message: `Incorrect API key provided: ${KEY}`, type: 'invalid_request_error', code: 'invalid_api_key' } }) }])
-    const r = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    const r = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY])
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error.text.startsWith('[provider-router] openai error 401: authentication failed')).toBe(true)
@@ -107,9 +96,19 @@ describe('openai adapter', () => {
     expect(r.error.stopReason).toBe('refusal')
   })
 
+  test('error text redacts every configured key passed in, not only its own', async () => {
+    const OTHER = 'other-provider-secret-value'
+    const p = provider([{ status: 400, text: JSON.stringify({ error: { message: `bad header ${OTHER}` } }) }])
+    const r = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY, OTHER])
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.error.text).toContain('[redacted]')
+    expect(r.error.text).not.toContain(OTHER)
+  })
+
   test('400 context length -> model_context_window_exceeded', async () => {
     const p = provider([{ status: 400, text: JSON.stringify({ error: { message: "This model's maximum context length is 400000 tokens.", code: 'context_length_exceeded' } }) }])
-    const r = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    const r = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY])
     expect(!r.ok && r.error.stopReason).toBe('model_context_window_exceeded')
   })
 
@@ -118,8 +117,8 @@ describe('openai adapter', () => {
       { status: 429, text: JSON.stringify({ error: { message: 'You exceeded your current quota' } }) },
       { status: 503, text: 'upstream unavailable' },
     ])
-    const a = await complete(p.fetch, REQ, undefined, OPENAI_T)
-    const b = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    const a = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY])
+    const b = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY])
     expect(!a.ok && a.error.text).toBe('[provider-router] openai error 429: rate limited or out of quota: You exceeded your current quota')
     expect(!b.ok && b.error.text).toBe('[provider-router] openai error 503: provider unavailable: upstream unavailable')
   })
@@ -129,15 +128,15 @@ describe('openai adapter', () => {
       { status: 200, text: JSON.stringify({ error: { message: 'model not loaded' } }) },
       { status: 200, text: '<html>gateway</html>' },
     ])
-    const a = await complete(p.fetch, REQ, undefined, OPENAI_T)
-    const b = await complete(p.fetch, REQ, undefined, OPENAI_T)
+    const a = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY])
+    const b = await complete(p.fetch, REQ, undefined, OPENAI_T, [KEY])
     expect(!a.ok && a.error.text).toBe('[provider-router] openai error: model not loaded')
     expect(!b.ok && b.error.text).toContain('[provider-router] openai error: unreadable reply')
   })
 
   test('custom endpoint with key: its own URL and Bearer key; no reasoning_effort', async () => {
     const p = provider([{ status: 200, text: OK_TEXT }])
-    const r = await complete(p.fetch, { ...REQ, model: 'org/llama:v1' }, 'high', { label: 'custom:gw', baseUrl: 'http://gateway.example.internal:4000/v1', key: GW_KEY, reasoning: false })
+    const r = await complete(p.fetch, { ...REQ, model: 'org/llama:v1' }, 'high', { label: 'custom:gw', baseUrl: 'http://gateway.example.internal:4000/v1', key: GW_KEY, reasoning: false }, [GW_KEY])
     expect(r.ok).toBe(true)
     expect(p.calls[0]!.url).toBe('http://gateway.example.internal:4000/v1/chat/completions')
     expect(p.calls[0]!.init.headers.authorization).toBe(`Bearer ${GW_KEY}`)
@@ -152,16 +151,15 @@ describe('openai adapter', () => {
       { status: 404, text: JSON.stringify({ error: { message: 'model llama not found' } }) },
     ])
     const t = { label: 'custom:local', baseUrl: 'http://localhost:11434/v1', key: undefined, reasoning: false }
-    const r = await complete(p.fetch, REQ, undefined, t)
+    const r = await complete(p.fetch, REQ, undefined, t, [])
     expect(r.ok).toBe(true)
     expect('authorization' in p.calls[0]!.init.headers).toBe(false)
-    const e = await complete(p.fetch, REQ, undefined, t)
+    const e = await complete(p.fetch, REQ, undefined, t, [])
     expect(!e.ok && e.error.text).toBe('[provider-router] custom:local error 404: not found (check the model id and base URL): model llama not found')
   })
 })
 
-const CFG = (keys: Record<string, string>, custom: [string, { url: string; key: string | undefined }][] = []) =>
-  ({ keys, custom: new Map(custom), contextWindows: new Map(), warnings: [] }) as any
+const CFG = (keys: Record<string, string>, custom: [string, { url: string; key: string | undefined }][] = []) => cfg(keys, { custom: new Map(custom) })
 
 describe('targetFor', () => {
   test('openai: OpenAI Platform base and key; reasoning by model', async () => {
@@ -199,52 +197,11 @@ describe('targetFor', () => {
 // ---------------------------------------------------------------------------
 // Routed step: shadow capture, then the adapter, through routedStep.
 
-const ZERO = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+// Engine stand-in (tests/harness.ts) whose request also carries fields the
+// router strips: metadata and thinking.
+const engine = () => sharedEngine({ metadata: { user_id: 'u' }, thinking: { type: 'adaptive' } })
 
-// Engine stand-in: sends the shadow request through the mod's shadowFetch
-// (the network beneath counts calls and must stay at 0), then yields a chunk
-// that must never reach the caller.
-function engine() {
-  const network: any[] = []
-  const seen: any[] = []
-  const next = async function* (e: any): AsyncGenerator<any, any> {
-    seen.push(e)
-    const headers: Record<string, string> = { 'x-claude-code-session-id': 's1' }
-    if (e.agentId) headers['x-claude-code-agent-id'] = e.agentId
-    const body = {
-      model: e.model,
-      system: [{ type: 'text', text: 'CAPTURED-SYS' }],
-      tools: [{ name: 'Bash', description: 'run', input_schema: { type: 'object' } }],
-      messages: [{ role: 'user', content: 'list files' }],
-      max_tokens: 32000,
-      metadata: { user_id: 'u' },
-      thinking: { type: 'adaptive' },
-      stream: true,
-    }
-    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, (x: any) => {
-      network.push(x)
-      return { value: { status: 200, ok: true, headers: {}, text: '' } }
-    })
-    yield { kind: 'text', index: 0, text: 'ENGINE-STUB-CHUNK' }
-    yield { kind: 'stop', stopReason: 'end_turn', usage: ZERO }
-    return { turnId: e.turnId, index: e.index, answer: 'ENGINE-STUB-CHUNK', toolUses: [] }
-  }
-  return { network, seen, next }
-}
-
-const io = (fetch: any) => ({ fetch, sleep: (_ms: number, o?: { signal?: AbortSignal }) => new Promise<void>((_r, rej) => o?.signal?.addEventListener('abort', () => rej(new Error('aborted')))), signal: new AbortController().signal })
-
-async function drain(g: AsyncGenerator<any, any>) {
-  const chunks: any[] = []
-  let s = await g.next()
-  while (!s.done) {
-    chunks.push(s.value)
-    s = await g.next()
-  }
-  return { chunks, result: s.value }
-}
-
-const step = (model: string, over: any = {}) => ({ turnId: 't1', index: 0, model, messageCount: 3, effort: 'high', ...over })
+const io = (fetch: any) => ({ fetch, sleep: sleeper().sleep, signal: new AbortController().signal })
 
 describe('routed step: openai and custom', () => {
   test('openai: captured request translated and sent; tool call streamed as chunks; no shadow on the network', async () => {

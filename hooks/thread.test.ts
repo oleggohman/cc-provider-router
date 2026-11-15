@@ -44,20 +44,20 @@ const REPLY = [{ type: 'tool_use', id: 'call_1', name: 'Bash', input: { command:
 
 describe('resolveThread', () => {
   test('a create is used as is and needs no state', () => {
-    const r = resolveThread(createBody, undefined)
+    const r = resolveThread(createBody, undefined, {})
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.body.messages).toEqual(createBody.messages)
   })
 
   test('a body without a thread field is used as is', () => {
     const { thread: _, ...plain } = createBody
-    const r = resolveThread(plain, undefined)
+    const r = resolveThread(plain, undefined, {})
     expect(r.ok).toBe(true)
   })
 
   test('a continue rebuilds the conversation from the loop state', () => {
     const state = { system: SYS, tools: [BASH, PLACEHOLDER], base: [...createBody.messages, { role: 'assistant', content: REPLY }] }
-    const r = resolveThread(continueBody, state)
+    const r = resolveThread(continueBody, state, {})
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.body.messages).toEqual([...createBody.messages, { role: 'assistant', content: REPLY }, ...continueBody.messages])
@@ -68,7 +68,7 @@ describe('resolveThread', () => {
   test('a continue that carries its own tools and full system keeps them', () => {
     const state = { system: SYS, tools: [BASH], base: [] as any[] }
     const own = { ...continueBody, system: [BILLING, { type: 'text', text: 'NEW SYSTEM' }], tools: [LATE] }
-    const r = resolveThread(own, state)
+    const r = resolveThread(own, state, {})
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.body.tools).toEqual([LATE])
@@ -76,7 +76,7 @@ describe('resolveThread', () => {
   })
 
   test('a continue without state is a clear error, never a partial request', () => {
-    const r = resolveThread(continueBody, undefined)
+    const r = resolveThread(continueBody, undefined, {})
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.message).toContain('/clear')
   })
@@ -84,7 +84,7 @@ describe('resolveThread', () => {
   test('a continue with no tools, empty tools or only the placeholder keeps the stored tools', () => {
     const state = { system: SYS, tools: [BASH, LATE], base: [] as any[] }
     for (const tools of [undefined, [], [PLACEHOLDER]]) {
-      const r = resolveThread({ ...continueBody, tools }, state)
+      const r = resolveThread({ ...continueBody, tools }, state, {})
       expect(r.ok && r.body.tools).toEqual([BASH, LATE])
     }
   })
@@ -128,7 +128,7 @@ describe('resolveThread', () => {
   test('no conversation and no way to rebuild it (no history, or no system prompt known): the clear error', () => {
     const history = [createBody.messages[0], { role: 'assistant', content: REPLY }]
     for (const r of [
-      resolveThread(continueBody, { system: SYS, tools: [BASH], base: undefined }),
+      resolveThread(continueBody, { system: SYS, tools: [BASH], base: undefined }, {}),
       resolveThread(continueBody, undefined, { history }),
       resolveThread(continueBody, undefined, { history: undefined, fallback: { system: SYS, tools: [BASH], base: [] } }),
     ]) {
@@ -139,7 +139,7 @@ describe('resolveThread', () => {
 
   test('anchors: a new previous_message_id is bound to the conversation it continues', () => {
     const base = [createBody.messages[0], { role: 'assistant', content: REPLY }]
-    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base })
+    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base }, {})
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.anchors).toEqual({ msg_hook_1: 2 })
   })
@@ -149,7 +149,7 @@ describe('resolveThread', () => {
     const a = (t: string) => ({ role: 'assistant', content: [{ type: 'text', text: t }] })
     const base = [u('one'), a('ONE'), u('two'), a('TWO'), u('three'), a('THREE')]
     const state = { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 2, msg_hook_2: 4 } }
-    const r = resolveThread(continueBody, state)
+    const r = resolveThread(continueBody, state, {})
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.body.messages).toEqual([u('one'), a('ONE'), ...continueBody.messages])
@@ -159,19 +159,19 @@ describe('resolveThread', () => {
 
   test('anchors: the anchor of the newest recorded turn changes nothing', () => {
     const base = [createBody.messages[0], { role: 'assistant', content: REPLY }]
-    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 2 } })
+    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 2 } }, {})
     expect(r.ok && r.body.messages).toEqual([...base, ...continueBody.messages])
   })
 
   test('anchors: an anchor past the known conversation is the clear error', () => {
     const base = [createBody.messages[0], { role: 'assistant', content: REPLY }]
-    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 9 } })
+    const r = resolveThread(continueBody, { system: SYS, tools: [BASH], base, anchors: { msg_hook_1: 9 } }, {})
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.message).toContain('/clear')
   })
 
   test('anchors: a create starts with none', () => {
-    const r = resolveThread(createBody, { system: SYS, tools: [BASH], base: [], anchors: { msg_hook_1: 0 } })
+    const r = resolveThread(createBody, { system: SYS, tools: [BASH], base: [], anchors: { msg_hook_1: 0 } }, {})
     expect(r.ok && r.anchors).toEqual({})
   })
 

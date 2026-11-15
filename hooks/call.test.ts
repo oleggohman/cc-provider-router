@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { DEFAULT_TIMEOUT_MS, raceCall } from './call.ts'
+import { tick } from '../tests/harness.ts'
 
 // A stand-in for `$.clock.sleep`: rejects at once when its signal aborts (as
 // the real one does), resolves when the test calls `fire()`.
@@ -35,10 +36,6 @@ function deferred<T>() {
     reject = rej
   })
   return { promise, resolve, reject }
-}
-
-async function tick() {
-  for (let i = 0; i < 20; i++) await Promise.resolve()
 }
 
 describe('raceCall', () => {

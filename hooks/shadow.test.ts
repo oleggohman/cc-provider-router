@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
 import { SHADOW_MODEL, ShadowError, isEngineRequest, resetShadow, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
+import { cfg, drain, sleeper, tick, ZERO } from '../tests/harness.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the engine
 // stand-in sends its requests straight through the mod's `http.fetch` logic
@@ -44,8 +45,6 @@ async function send(net: ReturnType<typeof network>, r: Req): Promise<any> {
   return out.value
 }
 
-const ZERO = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-
 // Engine stand-in for a step's `next`: sends `reqs` (default: one match for
 // the step's loop), records each answer, then yields a chunk that must never
 // reach the mod's caller.
@@ -65,34 +64,19 @@ function engine(net: ReturnType<typeof network>, opts: { reqs?: (e: any) => Req[
   return { answers, seen, next }
 }
 
-// Lets pending microtasks run (no timers in the kit's types).
-async function tick() {
-  for (let i = 0; i < 20; i++) await Promise.resolve()
-}
-
-async function drain(stream: AsyncGenerator<any, any>) {
-  const chunks: any[] = []
-  let step = await stream.next()
-  while (!step.done) {
-    chunks.push(step.value)
-    step = await stream.next()
-  }
-  return { chunks, result: step.value }
-}
-
 const step = (over: any = {}) => ({ turnId: 't1', index: 0, model: 'openai:gpt-5', messageCount: 1, ...over })
 const ROUTE = { provider: 'openai', model: 'gpt-5' } as const
-const CFG = { keys: { openai: 'sk-test-secret-123456' }, custom: new Map(), contextWindows: new Map(), warnings: [] }
+const CFG = cfg({ openai: 'sk-test-secret-123456' })
 
 // The provider beneath a captured step: answers 500 (the dispatch itself is
 // tested in the adapter tests). Never the network beneath shadowFetch.
 const io = (signal = new AbortController().signal) => ({
   fetch: async () => ({ status: 500, ok: false, text: '{"error":{"message":"test provider"}}' }),
-  sleep: (_ms: number, o?: { signal?: AbortSignal }) => new Promise<void>((_r, rej) => o?.signal?.addEventListener('abort', () => rej(new Error('aborted')))),
+  sleep: sleeper().sleep,
   signal,
 })
 
-const run = (e: any, eng: { next: any }, threads: Map<string, any> = new Map(), signal?: AbortSignal) => drain(routedStep(e, eng.next, ROUTE, CFG as any, io(signal), threads))
+const run = (e: any, eng: { next: any }, threads: Map<string, any> = new Map(), signal?: AbortSignal) => drain(routedStep(e, eng.next, ROUTE, CFG, io(signal), threads))
 
 describe('routed step with the shadow capture', () => {
   test('a match is answered with the zero-usage stub, never the network', async () => {

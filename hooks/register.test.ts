@@ -1,15 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-
-// Drains a turn.step stream; `stream.result` is undefined in the test kit.
-async function drain(stream: AsyncGenerator<any, any>) {
-  const chunks: any[] = []
-  let step = await stream.next()
-  while (!step.done) {
-    chunks.push(step.value)
-    step = await stream.next()
-  }
-  return { chunks, result: step.value }
-}
+import { onSubagentTurnEnd, onUnprefixedStep } from './register.ts'
+import { drain } from '../tests/harness.ts'
 
 test('unprefixed turn.step passes through to next unchanged', async ($, on) => {
   on('clock.sleep', () => ({ value: undefined }) as any)
@@ -34,8 +25,6 @@ test('unprefixed turn.step passes through to next unchanged', async ($, on) => {
 // ---------------------------------------------------------------------------
 // Loop state kept by the router across steps (usage for compaction, thread
 // state for continues).
-
-import { onSubagentTurnEnd, onUnprefixedStep } from './register.ts'
 
 function loopState() {
   const usage = new Map<string, any>([['main', { model: 'openai:gpt-5', inputTokens: 1 }], ['ag-1', { model: 'openai:gpt-5', inputTokens: 2 }]])

@@ -3,7 +3,10 @@
 // A /config change reloads the module, so there are no live config reads.
 // Key values never appear in warnings or messages.
 
-export type KeyedProvider = 'anthropic' | 'openai' | 'zai'
+import type { SimpleProvider } from './route.ts'
+
+// Every built-in provider needs a key.
+export type KeyedProvider = SimpleProvider
 
 export type CustomEndpoint = { url: string; key: string | undefined }
 
@@ -47,6 +50,14 @@ function list(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
 }
 
+// A trimmed `name=value` entry split at its first (or last) `=`; both parts
+// are '' when there is no `=` or nothing before it.
+function splitPair(raw: string, at: 'first' | 'last'): { name: string; value: string } {
+  const entry = raw.trim()
+  const eq = at === 'first' ? entry.indexOf('=') : entry.lastIndexOf('=')
+  return eq > 0 ? { name: entry.slice(0, eq).trim(), value: entry.slice(eq + 1).trim() } : { name: '', value: '' }
+}
+
 export async function loadConfig($: Env, options: Options): Promise<Config> {
   const warnings: string[] = []
 
@@ -67,11 +78,8 @@ export async function loadConfig($: Env, options: Options): Promise<Config> {
   const rawKeys = str(await $.env.get('ROUTER_CUSTOM_API_KEYS'))
   if (rawKeys) {
     rawKeys.split(',').forEach((part, i) => {
-      const entry = part.trim()
-      if (!entry) return
-      const eq = entry.indexOf('=')
-      const name = eq > 0 ? entry.slice(0, eq).trim() : ''
-      const key = eq > 0 ? entry.slice(eq + 1).trim() : ''
+      if (!part.trim()) return
+      const { name, value: key } = splitPair(part, 'first')
       if (!NAME_RE.test(name) || !key) {
         warnings.push(`ROUTER_CUSTOM_API_KEYS entry ${i + 1} skipped: expected name=key`)
         return
@@ -82,10 +90,8 @@ export async function loadConfig($: Env, options: Options): Promise<Config> {
 
   const custom = new Map<string, CustomEndpoint>()
   list(options.customEndpoints).forEach((raw, i) => {
-    const entry = raw.trim()
-    const eq = entry.indexOf('=')
-    const name = eq > 0 ? entry.slice(0, eq).trim() : ''
-    const url = eq > 0 ? entry.slice(eq + 1).trim().replace(/\/+$/, '') : ''
+    const { name, value } = splitPair(raw, 'first')
+    const url = value.replace(/\/+$/, '')
     if (!NAME_RE.test(name) || !/^https?:\/\/[^\s]+$/.test(url)) {
       warnings.push(`customEndpoints entry ${i + 1} skipped: expected name=http(s)://url`)
       return
@@ -101,10 +107,8 @@ export async function loadConfig($: Env, options: Options): Promise<Config> {
   // Exact-id entries; the built-in windows are in limits.ts.
   const contextWindows = new Map<string, number>()
   list(options.contextWindows).forEach((raw, i) => {
-    const entry = raw.trim()
-    const eq = entry.lastIndexOf('=')
-    const model = eq > 0 ? entry.slice(0, eq).trim() : ''
-    const tokens = eq > 0 ? Number(entry.slice(eq + 1).trim()) : NaN
+    const { name: model, value } = splitPair(raw, 'last')
+    const tokens = model ? Number(value) : NaN
     if (!model || !Number.isInteger(tokens) || tokens <= 0) {
       warnings.push(`contextWindows entry ${i + 1} skipped: expected model=tokens`)
       return

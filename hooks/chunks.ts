@@ -10,13 +10,22 @@ export type Usage = {
   cache_creation_input_tokens: number
 }
 
-export type StopReason = 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'pause_turn' | 'compaction' | 'refusal' | 'model_context_window_exceeded'
+export const ZERO_USAGE: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+// A usage count from a provider's reply: a finite number, else 0.
+export function num(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+const STOP_REASONS = ['end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn', 'compaction', 'refusal', 'model_context_window_exceeded'] as const
+
+export type StopReason = (typeof STOP_REASONS)[number]
 
 export type ReplyBlock = { type: 'text'; text: string } | { type: 'tool_use'; id: string; name: string; input: unknown }
 
 export type Reply = { model: string; content: ReplyBlock[]; stopReason: StopReason; usage: Usage }
 
-const STOPS = new Set<string>(['end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn', 'compaction', 'refusal', 'model_context_window_exceeded'])
+const STOPS = new Set<string>(STOP_REASONS)
 
 // A provider's stop reason as one the engine knows. A reply that calls tools
 // and says it just ended (or says nothing) stops with `tool_use`, so the

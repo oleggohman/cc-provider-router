@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, complete, parseMessage } from './anthropic.ts'
 import { routedStep } from '../register.ts'
-import { SHADOW_MODEL, resetShadow, shadowFetch, shadowStats } from '../shadow.ts'
+import { SHADOW_MODEL, resetShadow, shadowStats } from '../shadow.ts'
+import { cfg, drain, engine as sharedEngine, provider, sleeper, step, tick, ZERO } from '../../tests/harness.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the adapter
 // takes a fetch function and the tests pass a counting stand-in for the
@@ -9,18 +10,6 @@ import { SHADOW_MODEL, resetShadow, shadowFetch, shadowStats } from '../shadow.t
 
 const KEY = 'sk-ant-test-KEY-0123456789abcdef'
 const ZKEY = 'zai-test-key-abcdef0123456789.XYZsecret99'
-
-type Answer = { status: number; text: string }
-
-function provider(answers: Answer[] | ((url: string, init: any) => Answer)) {
-  const calls: { url: string; init: any }[] = []
-  const fetch = async (url: string, init: any) => {
-    calls.push({ url, init })
-    const a = typeof answers === 'function' ? answers(url, init) : (answers[calls.length - 1] ?? answers[answers.length - 1]!)
-    return { status: a.status, ok: a.status >= 200 && a.status < 300, headers: { 'content-type': 'application/json' }, text: a.text }
-  }
-  return { calls, fetch }
-}
 
 const REQ = {
   model: 'claude-sonnet-4-5',
@@ -57,7 +46,7 @@ const TOOL_TEXT = JSON.stringify({
 describe('anthropic adapter', () => {
   test('success: POST <base>/v1/messages with version and x-api-key; reply parsed, thinking dropped', async () => {
     const p = provider([{ status: 200, text: OK_TEXT }])
-    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
+    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
     expect(p.calls.length).toBe(1)
     const { url, init } = p.calls[0]!
     expect(url).toBe('https://api.anthropic.com/v1/messages')
@@ -80,9 +69,19 @@ describe('anthropic adapter', () => {
     expect(r.reply.usage).toEqual({ input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 3, cache_creation_input_tokens: 0 })
   })
 
+  test('error text redacts every configured key passed in, not only its own', async () => {
+    const OTHER = 'other-provider-secret-value'
+    const p = provider([{ status: 400, text: JSON.stringify({ error: { message: `bad header ${OTHER}` } }) }])
+    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY, OTHER])
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.error.text).toContain('[redacted]')
+    expect(r.error.text).not.toContain(OTHER)
+  })
+
   test('tool_use reply: blocks kept in order, missing cache usage reads 0', async () => {
     const p = provider([{ status: 200, text: TOOL_TEXT }])
-    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
+    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.reply.content).toEqual([
@@ -95,7 +94,7 @@ describe('anthropic adapter', () => {
 
   test('401: clear error, refusal stop, the key never echoed', async () => {
     const p = provider([{ status: 401, text: JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `invalid x-api-key ${KEY}` } }) }])
-    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
+    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error.text).toContain('[provider-router] anthropic error 401: authentication failed')
@@ -105,7 +104,7 @@ describe('anthropic adapter', () => {
 
   test('429 rate limit', async () => {
     const p = provider([{ status: 429, text: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Number of requests has exceeded your rate limit' } }) }])
-    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
+    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error.text).toContain('error 429: rate limited or out of quota: Number of requests')
@@ -116,21 +115,21 @@ describe('anthropic adapter', () => {
       { status: 500, text: JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Internal server error' } }) },
       { status: 529, text: JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }) },
     ])
-    const a = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
-    const b = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
+    const a = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
+    const b = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
     expect(!a.ok && a.error.text.includes('error 500: provider internal error')).toBe(true)
     expect(!b.ok && b.error.text.includes('error 529: provider overloaded: Overloaded')).toBe(true)
   })
 
   test('context-length 400 stops with model_context_window_exceeded', async () => {
     const p = provider([{ status: 400, text: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'prompt is too long: 210000 tokens > 200000 maximum' } }) }])
-    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
+    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
     expect(!r.ok && r.error.stopReason).toBe('model_context_window_exceeded')
   })
 
   test('a 200 that is not a message is an error, not a crash', async () => {
     const p = provider([{ status: 200, text: '<html>gateway</html>' }])
-    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY)
+    const r = await complete(p.fetch, REQ, ANTHROPIC_ROWS.anthropic, KEY, [KEY])
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error.text).toContain('[provider-router] anthropic error')
@@ -152,7 +151,7 @@ describe('parseMessage', () => {
 describe('zai row', () => {
   test('Bearer header, Z.ai base URL, no x-api-key', async () => {
     const p = provider([{ status: 200, text: OK_TEXT }])
-    const r = await complete(p.fetch, { ...REQ, model: 'glm-5.3' }, ANTHROPIC_ROWS.zai, ZKEY)
+    const r = await complete(p.fetch, { ...REQ, model: 'glm-5.3' }, ANTHROPIC_ROWS.zai, ZKEY, [ZKEY])
     expect(r.ok).toBe(true)
     const { url, init } = p.calls[0]!
     expect(url).toBe('https://api.z.ai/api/anthropic/v1/messages')
@@ -167,8 +166,8 @@ describe('zai row', () => {
       { status: 429, text: JSON.stringify({ error: { code: '1113', message: 'Insufficient balance or no resource package' } }) },
       { status: 401, text: JSON.stringify({ code: 1000, msg: `Authentication failed for ${ZKEY}`, success: false }) },
     ])
-    const a = await complete(p.fetch, REQ, ANTHROPIC_ROWS.zai, ZKEY)
-    const b = await complete(p.fetch, REQ, ANTHROPIC_ROWS.zai, ZKEY)
+    const a = await complete(p.fetch, REQ, ANTHROPIC_ROWS.zai, ZKEY, [ZKEY])
+    const b = await complete(p.fetch, REQ, ANTHROPIC_ROWS.zai, ZKEY, [ZKEY])
     expect(!a.ok && a.error.text).toBe('[provider-router] zai error 429: rate limited or out of quota: Insufficient balance or no resource package')
     expect(!b.ok && b.error.text.startsWith('[provider-router] zai error 401: authentication failed')).toBe(true)
     expect(!b.ok && b.error.text.includes(ZKEY)).toBe(false)
@@ -179,67 +178,9 @@ describe('zai row', () => {
 // ---------------------------------------------------------------------------
 // Routed step: shadow capture, then the adapter, through routedStep.
 
-const ZERO = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-
-// Engine stand-in: sends the shadow request through the mod's shadowFetch
-// (the network beneath counts calls and must stay at 0), then yields a chunk
-// that must never reach the caller.
-function engine() {
-  const network: any[] = []
-  const seen: any[] = []
-  const next = async function* (e: any): AsyncGenerator<any, any> {
-    seen.push(e)
-    const headers: Record<string, string> = { 'x-claude-code-session-id': 's1' }
-    if (e.agentId) headers['x-claude-code-agent-id'] = e.agentId
-    const body = {
-      model: e.model,
-      system: [{ type: 'text', text: 'CAPTURED-SYS' }],
-      tools: [{ name: 'Bash', description: 'run', input_schema: { type: 'object' } }],
-      messages: [{ role: 'user', content: 'list files' }],
-      max_tokens: 32000,
-      metadata: { user_id: 'u' },
-      thinking: { type: 'adaptive' },
-      stream: true,
-    }
-    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, (x: any) => {
-      network.push(x)
-      return { value: { status: 200, ok: true, headers: {}, text: '' } }
-    })
-    yield { kind: 'text', index: 0, text: 'ENGINE-STUB-CHUNK' }
-    yield { kind: 'stop', stopReason: 'end_turn', usage: ZERO }
-    return { turnId: e.turnId, index: e.index, answer: 'ENGINE-STUB-CHUNK', toolUses: [] }
-  }
-  return { network, seen, next }
-}
-
-function sleeper() {
-  const calls: { ms: number; signal?: AbortSignal }[] = []
-  let fire: (() => void) | undefined
-  const sleep = (ms: number, o?: { signal?: AbortSignal }) =>
-    new Promise<void>((resolve, reject) => {
-      calls.push({ ms, signal: o?.signal })
-      fire = resolve
-      o?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
-    })
-  return { calls, sleep, fire: () => fire?.() }
-}
-
-async function drain(g: AsyncGenerator<any, any>) {
-  const chunks: any[] = []
-  let s = await g.next()
-  while (!s.done) {
-    chunks.push(s.value)
-    s = await g.next()
-  }
-  return { chunks, result: s.value }
-}
-
-async function tick() {
-  for (let i = 0; i < 20; i++) await Promise.resolve()
-}
-
-const CFG = (keys: Record<string, string>) => ({ keys, custom: new Map(), contextWindows: new Map(), warnings: [] }) as any
-const step = (model: string, over: any = {}) => ({ turnId: 't1', index: 0, model, messageCount: 3, effort: 'high', ...over })
+// Engine stand-in (tests/harness.ts) whose request also carries fields the
+// router strips: metadata and thinking.
+const engine = () => sharedEngine({ metadata: { user_id: 'u' }, thinking: { type: 'adaptive' } })
 
 describe('routed step: anthropic and zai', () => {
   test('anthropic: captured request goes to the Platform; reply streamed as chunks; no shadow on the network', async () => {
@@ -248,7 +189,7 @@ describe('routed step: anthropic and zai', () => {
     const p = provider([{ status: 200, text: TOOL_TEXT }])
     const s = sleeper()
     const io = { fetch: p.fetch, sleep: s.sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('anthropic:claude-sonnet-4-5'), eng.next, { provider: 'anthropic', model: 'claude-sonnet-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
+    const { chunks, result } = await drain(routedStep(step('anthropic:claude-sonnet-4-5'), eng.next, { provider: 'anthropic', model: 'claude-sonnet-4-5' }, cfg({ anthropic: KEY }), io, new Map()))
     expect(eng.seen[0].model).toBe(SHADOW_MODEL)
     expect(eng.network.length).toBe(0)
     expect(p.calls.length).toBe(1)
@@ -277,7 +218,7 @@ describe('routed step: anthropic and zai', () => {
     const eng = engine()
     const p = provider([{ status: 200, text: OK_TEXT }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('zai:glm-5.3', { agentId: 'sub-7' }), eng.next, { provider: 'zai', model: 'glm-5.3' }, CFG({ zai: ZKEY }), io, new Map()))
+    const { chunks, result } = await drain(routedStep(step('zai:glm-5.3', { agentId: 'sub-7' }), eng.next, { provider: 'zai', model: 'glm-5.3' }, cfg({ zai: ZKEY }), io, new Map()))
     expect(eng.network.length).toBe(0)
     expect(p.calls[0]!.url).toBe('https://api.z.ai/api/anthropic/v1/messages')
     expect(p.calls[0]!.init.headers.authorization).toBe(`Bearer ${ZKEY}`)
@@ -291,7 +232,7 @@ describe('routed step: anthropic and zai', () => {
     const eng = engine()
     const p = provider([{ status: 200, text: OK_TEXT }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('anthropic:claude-opus-4-6'), eng.next, { provider: 'anthropic', model: 'claude-opus-4-6' }, CFG({}), io, new Map()))
+    const { chunks, result } = await drain(routedStep(step('anthropic:claude-opus-4-6'), eng.next, { provider: 'anthropic', model: 'claude-opus-4-6' }, cfg({}), io, new Map()))
     expect(eng.seen.length).toBe(0)
     expect(p.calls.length).toBe(0)
     expect(chunks[0].text).toContain('ROUTER_ANTHROPIC_API_KEY')
@@ -303,7 +244,7 @@ describe('routed step: anthropic and zai', () => {
     resetShadow()
     const p = provider([{ status: 401, text: JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `bad key ${KEY}` } }) }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
+    const { chunks, result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, cfg({ anthropic: KEY }), io, new Map()))
     expect(result.answer.startsWith('[provider-router] anthropic error 401')).toBe(true)
     expect(JSON.stringify(chunks)).not.toContain(KEY)
     expect(JSON.stringify(result)).not.toContain(KEY)
@@ -315,7 +256,7 @@ describe('routed step: anthropic and zai', () => {
       throw new Error(`connect ECONNREFUSED (auth ${KEY})`)
     }
     const io = { fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
+    const { result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, cfg({ anthropic: KEY }), io, new Map()))
     expect(result.answer).toContain('[provider-router] anthropic error')
     expect(result.answer).toContain('ECONNREFUSED')
     expect(result.answer).not.toContain(KEY)
@@ -327,7 +268,7 @@ describe('routed step: anthropic and zai', () => {
     const s = sleeper()
     const fetch = () => new Promise<any>(() => {})
     const io = { fetch, sleep: s.sleep, signal: new AbortController().signal, timeoutMs: 1234 }
-    const g = routedStep(step('zai:glm-5.3'), engine().next, { provider: 'zai', model: 'glm-5.3' }, CFG({ zai: ZKEY }), io, new Map())
+    const g = routedStep(step('zai:glm-5.3'), engine().next, { provider: 'zai', model: 'glm-5.3' }, cfg({ zai: ZKEY }), io, new Map())
     const pending = drain(g)
     for (let i = 0; i < 10 && !s.calls.length; i++) await tick()
     expect(s.calls[0]!.ms).toBe(1234)
@@ -343,7 +284,7 @@ describe('routed step: anthropic and zai', () => {
     const ctl = new AbortController()
     const fetch = () => new Promise<any>(() => {})
     const io = { fetch, sleep: s.sleep, signal: ctl.signal }
-    const pending = drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
+    const pending = drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, cfg({ anthropic: KEY }), io, new Map()))
     for (let i = 0; i < 10 && !s.calls.length; i++) await tick()
     ctl.abort()
     const { chunks, result } = await pending

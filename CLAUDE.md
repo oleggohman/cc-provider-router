@@ -19,8 +19,10 @@ are in `README.md`; the engine behaviour the design depends on is in
   per-loop conversation state for message-thread continues, body normalization.
 - `hooks/request.ts`, `hooks/translate.ts`, `hooks/providers/{anthropic,openai}.ts`:
   request building and the two adapters. `hooks/limits.ts`: per-model
-  context windows and max output tokens (one prefix-matched table). `hooks/chunks.ts`, `hooks/call.ts`,
-  `hooks/errors.ts`, `hooks/context.ts`, `hooks/providers-command.ts`.
+  context windows and max output tokens (one prefix-matched table).
+  `hooks/call.ts`: timeout/cancel of a provider call and the shared fetch and
+  adapter-result types. `hooks/chunks.ts`, `hooks/errors.ts`,
+  `hooks/context.ts`, `hooks/providers-command.ts`.
 - `tests/harness.ts`, `tests/fixtures/`: shared test stand-ins and transcripts.
 - `scripts/smoke.sh`: live smoke tests. `examples/agents/`: routed subagents.
 
@@ -65,7 +67,8 @@ are in `README.md`; the engine behaviour the design depends on is in
 
 - Anthropic-compatible: a row in `ANTHROPIC_ROWS` (`hooks/providers/anthropic.ts`).
   OpenAI-compatible: a branch in `targetFor` (`hooks/providers/openai.ts`).
-- Its prefix in `SIMPLE` (`hooks/route.ts`) and the dispatch in `routedStep`.
+- Its prefix in `SimpleProvider` and `SIMPLE` (`hooks/route.ts`; error text and
+  `KeyedProvider` follow) and the dispatch in `routedStep`.
 - Key: `KEY_SOURCES` plus a literal `$.env.get('<NAME>')` in `loadConfig`
   (`hooks/config.ts`), and a `userConfig` field in `.claude-plugin/plugin.json`.
 - A row in `rows()` (`hooks/providers-command.ts`) for `/providers`.
@@ -99,7 +102,8 @@ header for the rest. It passes plugin options via `--settings` with
 - Read a `$.turn.step(...)` stream with `.next()` until `done`;
   `stream.result` is `undefined` in the kit.
 - Stub `clock.sleep` (`on('clock.sleep', () => ({ value: undefined }))`),
-  otherwise sleeps wait on the mocked clock. Op hooks answer `{ value }`.
+  otherwise sleeps wait on the mocked clock. Op hooks (`http.fetch`,
+  `tool.list`, `clock.sleep`, `session.messages`) answer `{ value }`.
 - The kit refuses `$.http.fetch` from a test's own hooks, and the kit's mod
   instance is separate from the test's imports. Inject `fetch` / `sleep` /
   `signal` (`StepIO`) and test `routedStep`, `shadowFetch`, `shadowStep` and

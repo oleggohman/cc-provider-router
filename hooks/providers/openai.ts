@@ -8,13 +8,12 @@
 // Never uses `$.session.authorize()` / `init.auth`: these routes bill the
 // configured key, never the signed-in subscription.
 
-import type { Config } from '../config.ts'
-import { missingKeyMessage } from '../config.ts'
+import type { AdapterResult, Fetch } from '../call.ts'
+import { missingKeyMessage, type Config } from '../config.ts'
 import { localError, providerError } from '../errors.ts'
 import type { ProviderRequest } from '../request.ts'
-import type { Route } from '../route.ts'
+import { routeLabel, type Route } from '../route.ts'
 import { fromChat, toChat } from '../translate.ts'
-import type { AdapterResult, Fetch } from './anthropic.ts'
 
 export const OPENAI_BASE = 'https://api.openai.com/v1'
 
@@ -33,11 +32,11 @@ export function targetFor(route: Extract<Route, { provider: 'openai' | 'custom' 
   if (route.provider === 'openai') {
     const key = cfg.keys.openai
     if (!key) return { ok: false, message: missingKeyMessage('openai') }
-    return { ok: true, target: { label: 'openai', baseUrl: OPENAI_BASE, key, reasoning: isReasoningModel(route.model) } }
+    return { ok: true, target: { label: routeLabel(route), baseUrl: OPENAI_BASE, key, reasoning: isReasoningModel(route.model) } }
   }
   const ep = cfg.custom.get(route.name)
   if (!ep) return { ok: false, message: `unknown custom endpoint "${route.name}": add ${route.name}=<url> to the /config field customEndpoints` }
-  return { ok: true, target: { label: `custom:${route.name}`, baseUrl: ep.url, key: ep.key, reasoning: false } }
+  return { ok: true, target: { label: routeLabel(route), baseUrl: ep.url, key: ep.key, reasoning: false } }
 }
 
 // The error message of a 200 body that is an error object, if it is one.
@@ -51,12 +50,12 @@ function errorBody(text: string): string | undefined {
   }
 }
 
-export async function complete(fetch: Fetch, req: ProviderRequest, effort: string | number | undefined, t: OpenAITarget): Promise<AdapterResult> {
+// `secrets`: every configured key, redacted from error text.
+export async function complete(fetch: Fetch, req: ProviderRequest, effort: string | number | undefined, t: OpenAITarget, secrets: readonly string[]): Promise<AdapterResult> {
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (t.key) headers.authorization = `Bearer ${t.key}`
   const body = toChat(req, { reasoning: t.reasoning, effort })
   const res = await fetch(`${t.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) })
-  const secrets = [t.key]
   if (!res.ok) return { ok: false, error: providerError(t.label, res.status, res.text, secrets) }
   const reply = fromChat(res.text, req.model)
   if (!reply) {

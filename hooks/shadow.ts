@@ -18,6 +18,8 @@
 //   refuses anything that could be a shadow.
 // - The stub reports zero usage; its chunks are drained and never yielded.
 
+import { ZERO_USAGE } from './chunks.ts'
+
 export const SHADOW_MODEL = 'provider-router-shadow'
 
 type Pending = { messageCount: number; body: any | undefined }
@@ -46,7 +48,7 @@ export function resetShadow(): void {
 export class ShadowError extends Error {}
 
 type FetchEvent = { url: string; init?: { method?: string; headers?: Record<string, string>; body?: unknown; compress?: unknown } }
-type FetchResponse = { status: number; ok: boolean; headers: Record<string, string>; text: string }
+type ShadowResponse = { status: number; ok: boolean; headers: Record<string, string>; text: string }
 
 function header(headers: Record<string, string> | undefined, name: string): string | undefined {
   if (!headers) return undefined
@@ -61,7 +63,7 @@ export function loopKeyOf(agentId: string | undefined): string {
 }
 
 // Loop of an engine request, from its agent header.
-export function loopKey(headers: Record<string, string> | undefined): string {
+function loopKey(headers: Record<string, string> | undefined): string {
   return loopKeyOf(header(headers, 'x-claude-code-agent-id'))
 }
 
@@ -73,9 +75,8 @@ export function isEngineRequest(e: FetchEvent): boolean {
 }
 
 function stubSse(): string {
-  const zero = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
   const events: [string, unknown][] = [
-    ['message_start', { type: 'message_start', message: { id: 'msg_shadow', type: 'message', role: 'assistant', model: SHADOW_MODEL, content: [], stop_reason: null, stop_sequence: null, usage: zero } }],
+    ['message_start', { type: 'message_start', message: { id: 'msg_shadow', type: 'message', role: 'assistant', model: SHADOW_MODEL, content: [], stop_reason: null, stop_sequence: null, usage: ZERO_USAGE } }],
     ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
     ['content_block_stop', { type: 'content_block_stop', index: 0 }],
     ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 0 } }],
@@ -84,12 +85,12 @@ function stubSse(): string {
   return events.map(([ev, d]) => `event: ${ev}\ndata: ${JSON.stringify(d)}\n\n`).join('')
 }
 
-function stub(): FetchResponse {
+function stub(): ShadowResponse {
   return { status: 200, ok: true, headers: { 'content-type': 'text/event-stream' }, text: stubSse() }
 }
 
 // A local, non-retryable 400: the engine neither retries nor falls back.
-function refuse(): FetchResponse {
+function refuse(): ShadowResponse {
   counters.shadowRefused++
   return {
     status: 400,
@@ -132,7 +133,7 @@ function countMatches(messages: unknown, expected: number): boolean {
 
 // `http.fetch` hook. Returns the local answer, or calls `next` only for
 // requests that are clearly not shadows.
-export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) => R): Promise<R | { value: FetchResponse }> {
+export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) => R): Promise<R | { value: ShadowResponse }> {
   const body = parse(e.init?.body)
   if (!isEngineRequest(e)) {
     // Defence in depth: never pass anything that could be a shadow. A routed
@@ -164,7 +165,7 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
 // Already passed on by the hook: replayed. Otherwise anything that could be
 // a shadow is refused: any request while a shadow is pending, or one naming
 // the shadow model anywhere in its URL or text body.
-export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & { readonly called: boolean }): R | { value: FetchResponse } {
+export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & { readonly called: boolean }): R | { value: ShadowResponse } {
   if (next.called) return next(e)
   const body = e.init?.body
   if (pending.size > 0 || e.url.includes(SHADOW_MODEL) || (typeof body === 'string' && body.includes(SHADOW_MODEL))) return { value: refuse() }

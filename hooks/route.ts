@@ -1,10 +1,14 @@
 // Model-id router: decides from a model id's prefix which provider serves it.
 
-type Simple = 'anthropic' | 'openai' | 'zai'
+// The built-in providers: `<provider>:<id>`, each with its own key (config.ts).
+export type SimpleProvider = 'anthropic' | 'openai' | 'zai'
 
-export type Route = { [P in Simple]: { provider: P; model: string } }[Simple] | { provider: 'custom'; name: string; model: string }
+export type Route = { [P in SimpleProvider]: { provider: P; model: string } }[SimpleProvider] | { provider: 'custom'; name: string; model: string }
 
-const SIMPLE: readonly Simple[] = ['anthropic', 'openai', 'zai']
+const SIMPLE: readonly SimpleProvider[] = ['anthropic', 'openai', 'zai']
+
+// The id forms the router accepts, as named in error text.
+export const ID_FORMS = `${SIMPLE.map(p => `${p}:<id>`).join(', ')} or custom:<name>:<id>`
 
 // Parses `anthropic:<id>`, `openai:<id>`, `zai:<id>` or `custom:<name>:<id>`.
 // `<id>` may contain `/` and `:`. Returns null for an unprefixed id (the
@@ -28,11 +32,30 @@ export function parseModel(id: string): Route | null {
   return null
 }
 
-// The router prefix of an id that has one but does not parse (`openai:`,
-// `custom:gw`, `custom:gw:`): such a step is answered with a local error,
-// never sent to the engine on the subscription.
-export function malformedPrefix(id: string): string | undefined {
-  const prefix = id.slice(0, Math.max(0, id.indexOf(':')))
-  if (![...SIMPLE, 'custom'].includes(prefix)) return undefined
-  return parseModel(id) ? undefined : prefix
+// The text before an id's first `:` ('' when it has none).
+export function prefixOf(id: string): string {
+  return id.slice(0, Math.max(0, id.indexOf(':')))
+}
+
+export type ModelKind = { kind: 'route'; route: Route } | { kind: 'malformed'; prefix: string } | { kind: 'unprefixed' }
+
+// What the router does with a model id: route it; answer it with a local
+// error when it has a router prefix but does not parse (`openai:`,
+// `custom:gw`, `custom:gw:`), never sending it to the engine on the
+// subscription; or pass it to the engine untouched.
+export function classifyModel(id: string): ModelKind {
+  const route = parseModel(id)
+  if (route) return { kind: 'route', route }
+  const prefix = prefixOf(id)
+  return [...SIMPLE, 'custom'].includes(prefix) ? { kind: 'malformed', prefix } : { kind: 'unprefixed' }
+}
+
+// The label of a custom endpoint in errors and /providers.
+export function customLabel(name: string): string {
+  return `custom:${name}`
+}
+
+// The label of a route in errors and /providers.
+export function routeLabel(r: Route): string {
+  return r.provider === 'custom' ? customLabel(r.name) : r.provider
 }

@@ -82,7 +82,7 @@ const LOST =
 // continue's `previous_message_id` is bound to the conversation it builds on;
 // one bound earlier cuts the conversation back to that point. `anchors` are
 // the ones to record with the step.
-export function resolveThread(body: any, state: ThreadState | undefined, recovery: Recovery = {}): Resolved {
+export function resolveThread(body: any, state: ThreadState | undefined, recovery: Recovery): Resolved {
   if (body?.thread?.type !== 'continue') return { ok: true, body, anchors: {} }
   const known = state ?? recovery.fallback
   const system = systemIsEmpty(body.system) ? known?.system : body.system
@@ -115,9 +115,9 @@ export function resolveThread(body: any, state: ThreadState | undefined, recover
 // Records the step: the messages sent plus the assistant turn the engine now
 // holds (the reply, or the error text the step yielded), and the anchors
 // resolveThread bound.
-export function recordStep(threads: Threads, key: string, body: any, assistant: any[] | undefined, anchors: Anchors = {}): void {
+export function recordStep(threads: Threads, key: string, body: any, assistant: any[], anchors: Anchors): void {
   const messages = Array.isArray(body?.messages) ? body.messages : []
-  const base = assistant && assistant.length ? [...messages, { role: 'assistant', content: assistant }] : [...messages]
+  const base = assistant.length ? [...messages, { role: 'assistant', content: assistant }] : [...messages]
   threads.set(key, { system: body?.system, tools: Array.isArray(body?.tools) ? body.tools : undefined, base, anchors })
 }
 
@@ -134,7 +134,8 @@ function cleanTool(t: any): any {
   return cleanCache(rest)
 }
 
-function blocksOf(content: unknown): any[] {
+// Content as blocks: a string is one text block ('' none).
+export function blocksOf(content: unknown): any[] {
   if (typeof content === 'string') return content ? [{ type: 'text', text: content }] : []
   return Array.isArray(content) ? content : []
 }
@@ -211,7 +212,9 @@ export function normalizeBody(body: any): any {
 // (tools come before system in the prompt). Copies, never the inputs.
 const MAX_BREAKPOINTS = 4
 
-const hasCache = (b: any): boolean => !!b && typeof b === 'object' && b.cache_control !== undefined
+function hasCache(b: any): boolean {
+  return !!b && typeof b === 'object' && b.cache_control !== undefined
+}
 
 function noCache(b: any): any {
   const { cache_control: _, ...rest } = b

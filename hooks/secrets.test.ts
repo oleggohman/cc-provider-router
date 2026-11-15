@@ -111,9 +111,9 @@ describe('no key value in any output', () => {
   test('/providers status and model listing, including errors echoing the key', async () => {
     const c = await loadConfig(env, OPTIONS)
     const outputs: unknown[] = []
-    outputs.push(await providersCommand('', c, echoingProvider(200).fetch, shadowStats()))
-    for (const status of [200, 401, 500]) outputs.push(await listModels(echoingProvider(status).fetch, c))
-    outputs.push(await listModels(provider([new Error(`refused ${ALL.join(',')}`)]).fetch, c))
+    outputs.push(await providersCommand('', c, echoingProvider(200).fetch, shadowStats(), sleeper().sleep))
+    for (const status of [200, 401, 500]) outputs.push(await listModels(echoingProvider(status).fetch, c, sleeper().sleep))
+    outputs.push(await listModels(provider([new Error(`refused ${ALL.join(',')}`)]).fetch, c, sleeper().sleep))
     assertClean('/providers', outputs)
   })
 

@@ -4,8 +4,9 @@
 // buildRequest (request.ts); this module only changes the format.
 // Prompt caching, extended thinking and server tools are not translated.
 
-import { type Reply, type ReplyBlock, type StopReason, type Usage, normalizeStop } from './chunks.ts'
+import { type Reply, type ReplyBlock, type StopReason, type Usage, normalizeStop, num } from './chunks.ts'
 import type { ProviderRequest } from './request.ts'
+import { blocksOf } from './thread.ts'
 
 export type ChatMessage = { role: 'system' | 'user' | 'assistant' | 'tool'; content: any; tool_calls?: any[]; tool_call_id?: string }
 
@@ -56,8 +57,6 @@ function documentPart(b: any): any | null {
 // A user content block as a Chat content part, or null (dropped).
 function userPart(b: any): any | null {
   switch (b?.type) {
-    case 'text':
-      return typeof b.text === 'string' ? { type: 'text', text: b.text } : null
     case 'image':
       return imagePart(b)
     case 'document':
@@ -78,7 +77,7 @@ function userMessages(m: any): ChatMessage[] {
   const parts: any[] = []
   for (const b of m.content) {
     if (b?.type === 'tool_result') {
-      const blocks = typeof b.content === 'string' ? [{ type: 'text', text: b.content }] : Array.isArray(b.content) ? b.content : []
+      const blocks = blocksOf(b.content)
       // Tool messages carry text only: images and documents (a Read of a PDF)
       // move to the user message after them, with a note in the tool content.
       const texts: string[] = []
@@ -181,10 +180,6 @@ const FINISH: Record<string, StopReason> = {
   function_call: 'tool_use',
   length: 'max_tokens',
   content_filter: 'refusal',
-}
-
-function num(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
 function usageOf(u: any): Usage {

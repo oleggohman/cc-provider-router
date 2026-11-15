@@ -1,13 +1,13 @@
-// Stand-ins shared by the Task 7 tests: an engine that sends its shadow
-// request through the mod's shadowFetch (the network beneath counts calls),
-// a provider fetch, a controllable sleep, and a stream drain. No live
-// provider is ever called.
+// Shared test stand-ins: an engine that sends its shadow request through the
+// mod's shadowFetch (the network beneath counts calls), a provider fetch, a
+// controllable sleep, and a stream drain. No live provider is ever called.
 
 import { shadowFetch } from '../hooks/shadow.ts'
 
 export const ZERO = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
-export function engine() {
+// `extra` adds fields to the engine's request body (e.g. metadata, thinking).
+export function engine(extra: Record<string, unknown> = {}) {
   const network: any[] = []
   const seen: any[] = []
   const next = async function* (e: any): AsyncGenerator<any, any> {
@@ -20,6 +20,7 @@ export function engine() {
       tools: [{ name: 'Bash', description: 'run', input_schema: { type: 'object' } }],
       messages: [{ role: 'user', content: 'list files' }],
       max_tokens: 32000,
+      ...extra,
       stream: true,
     }
     await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, (x: any) => {
@@ -48,15 +49,18 @@ export function provider(answers: Answer[] | ((url: string, init: any) => Answer
   return { calls, fetch }
 }
 
-// A sleep that never fires on its own (the provider reply always wins).
+// A sleep that never fires on its own (the provider reply always wins),
+// unless the test calls `fire()` (the timer wins).
 export function sleeper() {
-  const calls: number[] = []
+  const calls: { ms: number; signal?: AbortSignal }[] = []
+  let fire: (() => void) | undefined
   const sleep = (ms: number, o?: { signal?: AbortSignal }) =>
-    new Promise<void>((_resolve, reject) => {
-      calls.push(ms)
+    new Promise<void>((resolve, reject) => {
+      calls.push({ ms, signal: o?.signal })
+      fire = resolve
       o?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
     })
-  return { calls, sleep }
+  return { calls, sleep, fire: () => fire?.() }
 }
 
 export async function drain(g: AsyncGenerator<any, any> | AsyncIterable<any>) {
