@@ -91,7 +91,8 @@ function loopKey(headers: Record<string, string> | undefined): string {
   return loopKeyOf(header(headers, 'x-claude-code-agent-id'))
 }
 
-// Engine requests carry `compress` and the session header; the mod's own
+// Engine requests carry the session header (and, in some engine versions,
+// `compress`; 2.1.325 sends no `compress`); the mod's own
 // `$.http.fetch` calls carry neither. Either marker counts (the wider rule is
 // the safer one: an engine request is never mistaken for the mod's own). Any
 // plugin can set them, so they only ever make handling stricter; they never
