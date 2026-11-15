@@ -194,13 +194,14 @@
 - Create: `hooks/context.ts`, `hooks/context.test.ts`, `hooks/providers-command.ts`, `hooks/providers-command.test.ts`
 - Modify: `hooks/register.ts`
 
-- [ ] write tests: window lookup (built-in table incl. a `zai:glm-*` id, `contextWindows` override, unknown); compact called from `turn.complete` after an 85% step on the main loop and never during `turn.step`; not called for a subagent; `{ skip }` respected; "context length exceeded" → message per loop type
-- [ ] ➕ write test: compact is never called synchronously inside the `turn.complete` hook; it is scheduled with `$.clock.after` after `next(e)` returns
-- [ ] ⚠️ implement `context.ts`: own per-loop usage tracking (routed usage does not reach `$.session.usage()`); `$.session.compact` scheduled via `$.clock.after` after `turn.complete`'s `next(e)` returns, wrapped in try/catch (rejects mid-turn, throws in `-p`); README recommends `autoCompactWindow` in routed agent definitions
-- [ ] write tests for `/providers`: configured providers, key yes/no, on-demand model listing for Anthropic and OpenAI shapes, provider down
-- [ ] implement `/providers`
-- [ ] write a test that no log, status, state or reply in the whole suite contains a test key value; run `mcp__plugin-authoring__scan_secrets` on the repo
-- [ ] run tests — must pass before Task 8
+- [x] write tests: window lookup (built-in table incl. a `zai:glm-*` id, `contextWindows` override, unknown); compact called from `turn.complete` after an 85% step on the main loop and never during `turn.step`; not called for a subagent; `{ skip }` respected; "context length exceeded" → message per loop type
+- [x] ➕ write test: compact is never called synchronously inside the `turn.complete` hook; it is scheduled with `$.clock.after` after `next(e)` returns
+- [x] ⚠️ implement `context.ts`: own per-loop usage tracking (routed usage does not reach `$.session.usage()`); `$.session.compact` scheduled via `$.clock.after` after `turn.complete`'s `next(e)` returns, wrapped in try/catch (rejects mid-turn, throws in `-p`); README recommends `autoCompactWindow` in routed agent definitions
+- [x] write tests for `/providers`: configured providers, key yes/no, on-demand model listing for Anthropic and OpenAI shapes, provider down
+- [x] implement `/providers`
+- [x] write a test that no log, status, state or reply in the whole suite contains a test key value; run `mcp__plugin-authoring__scan_secrets` on the repo (`hooks/secrets.test.ts`; scan: no known key or token format found, 44 files)
+- [x] ➕ `/providers models` lists on demand (Anthropic shape `GET /v1/models?limit=1000` for anthropic/zai, OpenAI shape `GET <base>/models` for openai/custom); providers without a key skipped; `errors.ts` gains `redact` (no 500-char cap) for command output
+- [x] run tests — must pass before Task 8
 
 ### Task 8: Live smoke tests
 **Files:**

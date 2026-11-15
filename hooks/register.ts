@@ -2,12 +2,14 @@ import type { Register } from 'claude-code'
 import { raceCall, type Sleep } from './call.ts'
 import { toChunks, toResult } from './chunks.ts'
 import { loadConfig, missingKeyMessage, type Config } from './config.ts'
-import { errorChunks, localError } from './errors.ts'
+import { createTracker, maybeCompact, trackUsage, withContextHint } from './context.ts'
+import { errorChunks, localError, sanitize } from './errors.ts'
 import { ANTHROPIC_ROWS, complete as anthropicComplete, type AdapterResult, type Fetch } from './providers/anthropic.ts'
 import { complete as openaiComplete, targetFor } from './providers/openai.ts'
 import { buildRequest } from './request.ts'
+import { providersCommand } from './providers-command.ts'
 import { parseModel, type Route } from './route.ts'
-import { shadowFetch, shadowStep } from './shadow.ts'
+import { shadowFetch, shadowStats, shadowStep } from './shadow.ts'
 
 function label(r: Route): string {
   return r.provider === 'custom' ? `custom:${r.name}` : r.provider
@@ -19,6 +21,8 @@ function label(r: Route): string {
 // read once on the first routed step.
 export const register: Register = (on, options) => {
   let config: Promise<Config> | undefined
+  // Last routed input size per loop, for compaction (see context.ts).
+  const usage = createTracker()
 
   // Shadow capture: answers the engine's shadow requests locally and refuses
   // every request that could be one (see shadow.ts). Fail closed.
@@ -26,14 +30,51 @@ export const register: Register = (on, options) => {
 
   on('turn.step', async function* ($, e, next) {
     const route = parseModel(e.model)
-    if (!route) return yield* next(e)
-    config ??= loadConfig($, options)
+    if (!route) {
+      // Back on the subscription: the engine tracks this loop's context.
+      usage.clear(e.agentId)
+      return yield* next(e)
+    }
+    const cfg = await (config ??= loadConfig($, options))
     const io: StepIO = {
       fetch: (url, init) => $.http.fetch(url, init),
       sleep: (ms, opts) => $.clock.sleep(ms, opts),
       signal: next.signal,
     }
-    return yield* routedStep(e, next, route, await config, io)
+    return yield* trackUsage(usage, e, routedStep(e, next, route, cfg, io))
+  })
+
+  // Compaction for routed main-loop turns: scheduled after the turn has
+  // ended, never inside this hook (compact rejects while a turn runs).
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (!e.agentId && !usage.get(undefined)) return result
+    const cfg = await (config ??= loadConfig($, options))
+    maybeCompact(usage, cfg.contextWindows, e, {
+      after: (ms, fn) => $.clock.after(ms, fn),
+      compact: () => $.session.compact(),
+    })
+    return result
+  })
+
+  on('session.start', async ($, e, next) => {
+    try {
+      await $.command.register({ name: 'providers', description: 'Provider router: configured providers, keys, shadow counters; /providers models lists models', argumentHint: '[models]' })
+    } catch {
+      // Registration refused (e.g. a mode without commands): the router still works.
+    }
+    return next(e)
+  })
+
+  on('command.run', { command: 'providers' }, async ($, e) => {
+    const cfg = await (config ??= loadConfig($, options))
+    try {
+      const text = await providersCommand(e.args ?? '', cfg, (url, init) => $.http.fetch(url, init), shadowStats())
+      return { text }
+    } catch (err) {
+      const secrets = [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)]
+      return { text: sanitize(`[provider-router] /providers failed: ${String(err)}`, secrets) }
+    }
   })
 }
 
@@ -89,7 +130,7 @@ export async function* routedStep<E extends StepEvent>(
     case 'failed':
       return yield* errorChunks(e, localError(name, `request failed: ${String(out.error)}`, secrets))
     case 'done':
-      if (!out.value.ok) return yield* errorChunks(e, out.value.error)
+      if (!out.value.ok) return yield* errorChunks(e, withContextHint(out.value.error, e.agentId))
       yield* toChunks(out.value.reply)
       return toResult(e, out.value.reply)
   }

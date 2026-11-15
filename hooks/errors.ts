@@ -29,11 +29,17 @@ const CONTEXT_RE = /context[ _-]?(length|window)|maximum context|prompt is too l
 // Patterns that look like credentials, stripped even when not configured here.
 const KEY_PATTERNS = [/\bsk-[A-Za-z0-9_\-]{8,}/g, /\bBearer\s+[A-Za-z0-9._\-]{8,}/gi, /\b[A-Za-z0-9]{24,}\.[A-Za-z0-9]{8,}\b/g]
 
-// Removes every known secret and anything shaped like a key.
-export function sanitize(text: string, secrets: readonly (string | undefined)[] = []): string {
+// Removes every known secret and anything shaped like a key, at any length.
+export function redact(text: string, secrets: readonly (string | undefined)[] = []): string {
   let out = text
   for (const s of secrets) if (s && s.length >= 4) out = out.split(s).join('[redacted]')
   for (const re of KEY_PATTERNS) out = out.replace(re, '[redacted]')
+  return out
+}
+
+// `redact`, then capped at 500 characters (error replies).
+export function sanitize(text: string, secrets: readonly (string | undefined)[] = []): string {
+  const out = redact(text, secrets)
   return out.length > 500 ? `${out.slice(0, 500)}...` : out
 }
 
