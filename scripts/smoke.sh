@@ -23,10 +23,16 @@
 # ${CLAUDE_CONFIG_DIR:-~/.claude}/projects.
 #
 # Every case asserts: the reply carries the marker, the marker came from a
-# real Bash tool run, routed steps were answered by the routed model, and the
-# zero-leak rules: /providers shows shadowLeaks 0, usage lists no model other
-# than the session's own plus a zero-cost shadow entry, and the transcript has
-# no shadow-model or stub entries. Never prints key values.
+# real Bash tool run, routed steps were answered in place (the router hands
+# the engine the provider's reply: the step carries a router-minted
+# `msg_pr_*` id and the provider's model name, with no router prefix), and
+# the zero-leak rules: /providers shows shadowLeaks 0 and the curl transport,
+# usage lists no model other than the subscription's own plus a zero-cost
+# shadow entry, and the transcript has no shadow-model or stub entries and
+# names the provider's model on its `msg_pr_*` rows. The error case still
+# shows the `[provider-router]` text and has no `msg_pr_*` step. The local,
+# free auto-mode check is scripts/automode-check.sh (npm run automode).
+# Never prints key values.
 
 set -uo pipefail
 
@@ -40,6 +46,8 @@ else echo "timeout not found (GNU coreutils; on macOS: brew install coreutils)";
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 SHADOW=provider-router-shadow
+# A router-prefixed model id (route.ts ROUTER_PREFIXES), as a jq regex.
+PREFIX_RE='^(anthropic|openai|zai|xai|custom)(:|$)'
 ANTHROPIC_MODEL="${SMOKE_ANTHROPIC_MODEL:-claude-haiku-5-5}"
 ZAI_MODEL="${SMOKE_ZAI_MODEL:-glm-5.3}"
 OPENAI_MODEL="${SMOKE_OPENAI_MODEL:-gpt-5-mini}"
@@ -164,8 +172,10 @@ session() {
   grep '^{' "$raw" >"$OUT/$name.jsonl" || true
 }
 
-# Model-usage keys allowed besides the session's own (a regex): none, or the
-# subscription models for the switch case.
+# Model-usage keys allowed besides a subscription main session's own model
+# and the zero-cost shadow entry (a regex): none, or the subscription models
+# for the switch case. A routed main session adds no usage entry of its own:
+# the engine sees only the shadow model, with zero usage.
 NO_OTHER_USAGE='^$'
 SUBSCRIPTION_USAGE='^claude-'
 
@@ -182,16 +192,28 @@ check() {
     case "$reply" in *"$m"*) ;; *) err="$err reply lacks $m;" ;; esac
     case "$results" in *"$m"*) ;; *) err="$err no tool result with $m;" ;; esac
   done
-  for r in $routed; do
-    if [ "$mainRouted" = 1 ]; then
-      jq -e --arg r "$r" 'select(.type=="assistant" and .parent_tool_use_id==null and .message.model==$r)' "$f" >/dev/null || err="$err main not answered by $r;"
-    else
-      jq -e --arg r "$r" 'select(.type=="assistant" and .parent_tool_use_id!=null and .message.model==$r)' "$f" >/dev/null || err="$err no subagent step answered by $r;"
-    fi
-  done
-  # Zero leak: counters, usage, transcript.
-  jq -r 'select(.type=="result") | .result' "$f" | grep -q 'shadowLeaks 0,' || err="$err shadowLeaks not 0 (or /providers missing);"
+  # Routed steps are answered in place: a msg_pr_* id and the provider's
+  # model name (never the prefixed id or the shadow model). Main: at least
+  # one such step on the main loop; subagents: one subagent with such a step
+  # per routed model id.
+  local inplace='select(.type=="assistant" and ((.message.id // "") | startswith("msg_pr_")))'
+  local wrongModel; wrongModel="$(jq -r --arg sh "$SHADOW" --arg pre "$PREFIX_RE" "$inplace"' | .message.model // "" | select(. == "" or . == $sh or test($pre))' "$f" | sort -u | tr '\n' ' ')"
+  [ -z "$wrongModel" ] || err="$err routed steps name '$wrongModel', not the provider's model;"
+  local nroutedIds; nroutedIds="$(printf '%s\n' $routed | sort -u | grep -c .)"
+  if [ "$mainRouted" = 1 ]; then
+    jq -e "$inplace"' | select(.parent_tool_use_id==null)' "$f" >/dev/null || err="$err main has no step answered in place (msg_pr_* id);"
+  else
+    local subs; subs="$(jq -r "$inplace"' | .parent_tool_use_id // empty' "$f" | sort -u | grep -c .)"
+    [ "$subs" -ge "$nroutedIds" ] || err="$err $subs subagent(s) answered in place, expected $nroutedIds;"
+  fi
+  local names; names="$(jq -r "$inplace"' | .message.model' "$f" | sort -u | tr '\n' ' ')"
+  # Zero leak: counters, transport, usage, transcript.
+  local status; status="$(jq -r 'select(.type=="result") | .result' "$f")"
+  printf '%s' "$status" | grep -q 'shadowLeaks 0,' || err="$err shadowLeaks not 0 (or /providers missing);"
+  printf '%s' "$status" | grep -q 'transport: curl' || err="$err /providers does not show transport: curl;"
   local mainModel; mainModel="$(jq -r 'select(.type=="system" and .subtype=="init") | .model' "$f" | head -1)"
+  # A routed main session's own id never appears in usage.
+  [ "$mainRouted" = 1 ] && mainModel="$SHADOW"
   local bad; bad="$(jq -r --arg main "$mainModel" --arg sh "$SHADOW" --arg allow "$allowUsage" 'select(.type=="result") | .modelUsage // {} | to_entries[]
       | select(.key != $main and ((.key | test($allow)) | not) and (.key != $sh or (.value.inputTokens + .value.outputTokens + .value.cacheReadInputTokens + .value.cacheCreationInputTokens) > 0 or .value.costUSD > 0)) | .key' "$f" | sort -u | tr '\n' ' ')"
   [ -z "$bad" ] || err="$err unexpected usage entries: $bad;"
@@ -202,10 +224,15 @@ check() {
       | jq -r --arg sh "$SHADOW" 'select(.type=="assistant" and .message.model==$sh) | "shadow-model assistant entry"' | head -1)"
     [ -z "$dirty" ] || err="$err transcript: $dirty;"
     grep -q 'shadow request refused locally' "$tr" && err="$err transcript has a refused-shadow error;"
+    # Transcript rows of routed steps: a msg_pr_* id and the provider's model.
+    local rows; rows="$(cat "$tr" "$(dirname "$tr")/$sid"/subagents/*.jsonl 2>/dev/null \
+      | jq -r --arg sh "$SHADOW" --arg pre "$PREFIX_RE" 'select(.type=="assistant" and ((.message.id // "") | startswith("msg_pr_"))) | .message.model // "" | if . == "" or . == $sh or test($pre) then "bad:" + . else "ok" end' | sort | uniq -c | tr '\n' ' ')"
+    case "$rows" in *ok*) ;; *) err="$err transcript has no msg_pr_* row;" ;; esac
+    case "$rows" in *bad:*) err="$err transcript msg_pr_* rows name a wrong model: $rows;" ;; esac
   else
     err="$err transcript for session not found;"
   fi
-  if [ -z "$err" ]; then pass "$name"; else fail "$name" "$err"; fi
+  if [ -z "$err" ]; then pass "$name${names:+ (provider model: ${names% })}"; else fail "$name" "$err"; fi
 }
 
 # check_error <name> <expected text>: a step answered locally with a
@@ -216,6 +243,8 @@ check_error() {
   local reply; reply="$(jq -r 'select(.type=="result") | .result' "$f")"
   case "$reply" in *"[provider-router]"*"$expect"*) ;; *) err="$err reply lacks [provider-router] ... $expect;" ;; esac
   printf '%s' "$reply" | grep -q 'shadowLeaks 0,' || err="$err shadowLeaks not 0 (or /providers missing);"
+  # Nothing was answered in place: no provider was called.
+  jq -e 'select(.type=="assistant" and ((.message.id // "") | startswith("msg_pr_")))' "$f" >/dev/null && err="$err a step was answered in place (msg_pr_* id);"
   if [ -z "$err" ]; then pass "$name"; else fail "$name" "$err"; fi
 }
 
