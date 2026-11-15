@@ -233,12 +233,12 @@ Each item is answered live and recorded as a row in `docs/design-notes.md` with 
 **Files:**
 - Create: `hooks/sse.ts`, `hooks/sse.test.ts`
 
-- [ ] write tests for `toSse`: text only; tool call only; text and two tool calls; empty text block dropped; indexes from 0; `stop_reason` carried; usage always zero and the reply's model name in `message_start`; arguments JSON round-trips (nested objects, unicode, empty object); the body always ends with `message_delta` and `message_stop`
-- [ ] write tests for the stop-reason gate: `end_turn`, `tool_use`, `max_tokens`, `stop_sequence` are written; a reply stopping with `refusal`, `model_context_window_exceeded`, `pause_turn` or `compaction` is reported as not answerable in place (the caller takes the error path)
-- [ ] write tests for `stubSse` (moved from `shadow.ts`, unchanged output) and for `sameDelivery(result, staged)`: `answer` compared trimmed, tool arguments compared whatever the key order, a different value or name or stop reason is a mismatch
-- [ ] write a test that every emitted event parses as `event:` / `data:` JSON and that ids from two calls differ
-- [ ] implement `toSse`, the stop-reason gate, `stubSse`, `sameDelivery` and the id minting in `hooks/sse.ts`
-- [ ] run tests, typecheck, validate - must pass before Task 4
+- [x] write tests for `toSse`: text only; tool call only; text and two tool calls; empty text block dropped; indexes from 0; `stop_reason` carried; usage always zero and the reply's model name in `message_start`; arguments JSON round-trips (nested objects, unicode, empty object); the body always ends with `message_delta` and `message_stop`
+- [x] write tests for the stop-reason gate: `end_turn`, `tool_use`, `max_tokens`, `stop_sequence` are written; a reply stopping with `refusal`, `model_context_window_exceeded`, `pause_turn` or `compaction` is reported as not answerable in place (the caller takes the error path)
+- [x] write tests for `stubSse` (moved from `shadow.ts`, unchanged output) and for `sameDelivery(result, staged)`: `answer` compared trimmed, tool arguments compared whatever the key order, a different value or name or stop reason is a mismatch
+- [x] write a test that every emitted event parses as `event:` / `data:` JSON and that ids from two calls differ
+- [x] implement `toSse`, the stop-reason gate, `stubSse`, `sameDelivery` and the id minting in `hooks/sse.ts`
+- [x] run tests, typecheck, validate - must pass before Task 4
 
 ### Task 4: Jobs in `shadow.ts`, behind today's `shadowStep`
 
