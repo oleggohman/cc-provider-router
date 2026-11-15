@@ -400,6 +400,64 @@ describe('routed steps across a thread', () => {
     expect(eng.network.length).toBe(0)
   })
 
+  test('a reply interrupted while its chunks are delivered is not recorded: the conversation is dropped, system and tools kept', async () => {
+    const replies = { tool: { status: 200, text: toolReply }, error: { status: 500, text: '{}' } }
+    // How the delivery ends: closed after the first chunk (Esc mid-stream),
+    // left after the first chunk, or every chunk read but Esc before the end.
+    const endings = ['closed', 'left', 'esc-at-end'] as const
+    for (const [kind, answer] of Object.entries(replies)) {
+      for (const ending of endings) {
+        resetShadow()
+        const eng = threadEngine([createBody, continueBody])
+        const p = provider([{ status: 200, text: textReply }, answer, { status: 200, text: textReply }])
+        const threads = new Map<string, ThreadState>()
+        const live = new AbortController().signal
+        await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal: live }, threads))
+        const recorded = threads.get('main')!
+        const esc = new AbortController()
+        const g = routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal: esc.signal }, threads)
+        const first = await g.next()
+        expect(first.done).toBe(false)
+        if (ending === 'closed') await g.return(undefined)
+        if (ending === 'esc-at-end') {
+          let s = first
+          while (!s.done && s.value?.kind !== 'stop') s = await g.next()
+          esc.abort()
+          expect((await g.next()).done).toBe(true)
+        }
+        const after = threads.get('main')!
+        expect([kind, ending, after.base]).toEqual([kind, ending, undefined])
+        expect(after.anchors).toBe(undefined)
+        expect(JSON.stringify(after.system)).toContain('You are an agent.')
+        expect(after.tools).toEqual(recorded.tools)
+        expect(eng.network.length).toBe(0)
+      }
+    }
+  })
+
+  test('an interrupted delivery: the next continue is rebuilt from the session history', async () => {
+    resetShadow()
+    const third = { ...continueBody, thread: { type: 'continue', previous_message_id: 'msg_hook_2' }, messages: [{ role: 'user', content: [{ type: 'text', text: 'NEXT' }] }] }
+    const eng = threadEngine([createBody, continueBody, third])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const threads = new Map<string, ThreadState>()
+    const signal = new AbortController().signal
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    const g = routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads)
+    await g.next()
+    await g.return(undefined)
+    // What the engine kept of the interrupted step: its text, no tool call.
+    const history = [createBody.messages[0], { role: 'assistant', content: REPLY }, ...continueBody.messages, { role: 'assistant', content: [{ type: 'text', text: 'PARTIAL' }] }]
+    const ok = await drain(routedStep(e(2), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => history }, threads))
+    expect(ok.result.answer).toBe('SMOKE')
+    const sent = JSON.parse(p.calls[2]!.init.body)
+    expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user'])
+    expect(sent.messages[3].content).toEqual([{ type: 'text', text: 'PARTIAL' }])
+    // The interrupted reply's tool call is never sent without its result.
+    expect(JSON.stringify(sent.messages).split('"tool_use"').length - 1).toBe(1)
+    expect(eng.network.length).toBe(0)
+  })
+
   test('a timed-out step is recorded like an error: its text is the assistant turn', async () => {
     resetShadow()
     const eng = threadEngine([createBody, continueBody])

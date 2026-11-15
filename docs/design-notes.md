@@ -97,7 +97,13 @@ needs a beta header). `hooks/thread.ts` therefore:
   `eager_input_streaming` dropped, consecutive same-role messages merged with
   `tool_result` blocks first;
 - records an error step as an assistant text turn (the engine records it the
-  same way) and records nothing for a cancelled step;
+  same way) and records nothing for a step cancelled before its reply was
+  delivered. A step counts as delivered once the engine has read every chunk,
+  the stop chunk included, and asked for the step's result without Esc; it is
+  recorded only then. A delivery cut short (Esc, the stream closed or left)
+  leaves the engine holding an unknown part of the reply, so the loop's
+  conversation is dropped (system prompt and tools kept) and the next
+  continue is rebuilt from the session history;
 - stores the tools in force after a step's `tool_addition` / `tool_removal`
   blocks, since the session history holds no tool changes;
 - binds each continue's `previous_message_id` to the length of the

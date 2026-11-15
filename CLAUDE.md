@@ -44,11 +44,13 @@ are in `README.md`; the engine behaviour the design depends on is in
   shadow request or a prefixed model reach the network or the engine.
 - **Thread-state invariants** (`hooks/thread.ts`, `routedStep`): a step that
   reached the provider and failed is recorded with its error text as the
-  assistant turn; a cancelled step (Esc) records nothing; a step that failed
-  before its request was captured drops the loop's conversation (`dropBase`),
-  to be rebuilt from `$.session.messages({ as: 'api' })`; recorded tools are
-  the ones in force after the step's tool additions and removals; a history
-  with no
+  assistant turn; a step is recorded only once its reply is delivered (the
+  engine read every chunk and asked for the result without Esc); a step
+  cancelled (Esc) before delivery records nothing; a step whose delivery was
+  cut short, or that failed before its request was captured, drops the loop's
+  conversation (`dropBase`), to be rebuilt from
+  `$.session.messages({ as: 'api' })`; recorded tools are the ones in force
+  after the step's tool additions and removals; a history with no
   assistant turn is never used (the clear error, or for a fork the forked
   loop's conversation); a loop with no state takes another loop's system
   prompt and tools only when `$.agent.list()` shows it is a fork; every

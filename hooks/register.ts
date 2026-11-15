@@ -225,9 +225,11 @@ async function recoveryFor(body: any, agentId: string | undefined, threads: Thre
 //
 // Thread-state invariants (thread.ts): a step that reached the provider and
 // failed is recorded with its error text as the assistant turn (the engine
-// records it so); a cancelled step records nothing; a step that failed before
-// its request was captured drops the loop's conversation, since the engine
-// records an error turn the router cannot place.
+// records it so); a step cancelled before its reply was delivered records
+// nothing; a step whose delivery was cut short, or that failed before its
+// request was captured, drops the loop's conversation, since the engine
+// records a turn the router cannot place. A step is recorded only once its
+// reply is delivered (see deliver).
 export async function* routedStep<E extends StepEvent>(
   e: E,
   next: (e: E) => AsyncIterable<unknown>,
@@ -269,10 +271,23 @@ export async function* routedStep<E extends StepEvent>(
   const resolved = resolveThread(body, threads.get(key), await recoveryFor(body, e.agentId, threads, io))
   if (!resolved.ok) return yield* early(resolved.message)
   const request = buildRequest(normalizeBody(resolved.body), route.model, maxOutputTokens(e.model))
-  const fail = (err: ReturnType<typeof localError>) => {
-    recordStep(threads, key, resolved.body, [{ type: 'text', text: err.text }], resolved.anchors)
-    return errorChunks(e, err)
+  // A reply counts as delivered once the engine has read every chunk, the
+  // stop chunk included, and asked for the result without Esc. Only then is
+  // the step recorded. Until then the loop keeps this step's system prompt
+  // and tools but no conversation: a delivery cut short (Esc, the stream
+  // closed or left) leaves the engine with an unknown part of the reply, so
+  // the next continue is rebuilt from the session history instead of
+  // resending a reply (and tool calls) the engine never took.
+  const { body: sent, anchors } = resolved
+  function* deliver<R>(chunks: Generator<any, R, unknown>, assistant: any[]): Generator<any, R, unknown> {
+    recordStep(threads, key, sent, assistant, anchors)
+    const done = threads.get(key)!
+    dropBase(threads, key)
+    const result = yield* chunks
+    if (!io.signal.aborted) threads.set(key, done)
+    return result
   }
+  const fail = (err: ReturnType<typeof localError>) => deliver(errorChunks(e, err), [{ type: 'text', text: err.text }])
   const out = await raceCall(io.sleep, io.signal, () => send(request), io.timeoutMs)
   switch (out.kind) {
     case 'cancelled':
@@ -284,8 +299,7 @@ export async function* routedStep<E extends StepEvent>(
       return yield* fail(localError(name, `request failed: ${String(out.error)}`, secrets))
     case 'done':
       if (!out.value.ok) return yield* fail(withContextHint(out.value.error, e.agentId))
-      recordStep(threads, key, resolved.body, out.value.reply.content, resolved.anchors)
-      yield* toChunks(out.value.reply)
+      yield* deliver(toChunks(out.value.reply), out.value.reply.content)
       return toResult(e, out.value.reply)
   }
 }

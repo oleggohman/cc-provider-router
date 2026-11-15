@@ -286,13 +286,16 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
   configurable: a very long file write on such a model can stop at the limit.
 - **Esc does not cancel a call already sent.** The step ends at once, but the
   provider still finishes the request and bills it. Provider timeout: 600 s.
+  Esc while a reply is being handed to Claude Code drops the router's copy of
+  the conversation; the next step rebuilds it from the session history.
 - **Your subscription is never routed** and never pays for a routed call. The
   router does not use your Claude sign-in.
 - **History in memory.** Claude Code sends a conversation as a thread (after
   the first request, only the new messages), so the router keeps each routed
   conversation's history itself. When it has none for a step (after a step
   that failed before its request was captured, Esc on a conversation's first
-  routed step, an engine fork such as compaction, a subagent resumed after
+  routed step or while a reply was handed over, an engine fork such as
+  compaction, a subagent resumed after
   its turn ended, or a switch from a subscription model), it rebuilds it from
   the session's own history. An engine fork such as compaction takes the
   system prompt and tools of the conversation it forks; a subagent never
