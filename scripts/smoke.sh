@@ -47,6 +47,9 @@ CUSTOM_URL="${SMOKE_CUSTOM_URL:-}"
 CUSTOM_MODEL="${SMOKE_CUSTOM_MODEL:-}"
 CASES="${SMOKE_CASES:-main turns switch sub parallel background errors}"
 TIMEOUT="${SMOKE_TIMEOUT:-600}"
+POLL=2              # seconds between checks of a session's output
+SLASH_WAIT=30       # seconds a slash command may take to answer
+PROVIDERS_WAIT=120  # seconds /providers may take to answer
 
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/provider-router-smoke.XXXXXX")"
 [ -n "${SMOKE_KEEP:-}" ] || trap 'rm -rf "$OUT"' EXIT
@@ -55,6 +58,7 @@ PASS=0 FAIL=0 SKIP=0
 pass() { PASS=$((PASS + 1)); echo "PASS  $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL  $1: $2"; }
 skip() { SKIP=$((SKIP + 1)); echo "SKIP  $1: $2"; }
+upper() { printf '%s' "$1" | tr a-z A-Z; }
 
 # Configured providers as "label model-id" pairs (model ids prefixed).
 PROVIDERS=()
@@ -88,7 +92,9 @@ fi
 # tools), with the model under test and Bash only.
 AGENTS="$OUT/agents.json"
 example_body() { awk 'BEGIN{n=0} /^---$/{n++; next} n>=2{print}' "$1"; }
-BODY="$(example_body examples/agents/glm-worker.md)"
+for file in examples/agents/*.md; do
+  [ -n "$(example_body "$file")" ] || { echo "$file has no body"; exit 2; }
+done
 {
   echo '{}'
   for p in "${PROVIDERS[@]}"; do
@@ -100,7 +106,6 @@ BODY="$(example_body examples/agents/glm-worker.md)"
       '{($n): {description: ("Smoke test worker on " + $m + ". Use only when asked for " + $n + "."), prompt: $b, model: $m, tools: ["Bash"]}}'
   done
 } | jq -s 'add' >"$AGENTS"
-[ -n "$BODY" ] || { echo "examples/agents/glm-worker.md has no body"; exit 2; }
 
 # All markers of a case appear in the session's results so far.
 markers_seen() {
@@ -108,59 +113,63 @@ markers_seen() {
   for m in "$@"; do grep '"type":"result"' "$f" 2>/dev/null | grep -q "$m" || return 1; done
 }
 
-# run <name> <prompt> <markers, space-separated> [claude args...]: one
-# session. /providers is sent only once every marker has reached a reply (a
-# background subagent's result arrives as a later turn), so the counters are
-# read after all routed work; then stdin closes and the session ends.
-run() {
-  local name="$1" prompt="$2" markers="$3"; shift 3
-  : >"$OUT/$name.raw"
-  {
-    jq -nc --arg c "$prompt" '{type: "user", message: {role: "user", content: $c}}'
-    local i=0
-    while [ "$i" -lt "$TIMEOUT" ] && ! markers_seen "$OUT/$name.raw" $markers; do sleep 2; i=$((i + 2)); done
-    jq -nc '{type: "user", message: {role: "user", content: "/providers"}}'
-    i=0
-    while [ "$i" -lt 120 ] && ! grep -q 'shadowLeaks' "$OUT/$name.raw"; do sleep 2; i=$((i + 2)); done
-  } | "$TIMEOUT_BIN" "$TIMEOUT" claude -p --plugin-dir "$ROOT" --settings "$SETTINGS" --agents "$AGENTS" \
-    --input-format stream-json --output-format stream-json --verbose \
-    --allowedTools Bash,Agent "$@" >"$OUT/$name.raw" 2>"$OUT/$name.err"
-  grep '^{' "$OUT/$name.raw" >"$OUT/$name.jsonl" || true
-}
-
 results_count() { local c; c="$(grep -c '"type":"result"' "$1" 2>/dev/null)"; echo "${c:-0}"; }
 
-# run_turns <name> [claude args...]: one session sending each entry of TURNS
-# in order, each once the previous one has a result (a slash command waits at
-# most 30 s), then /providers as in run.
-run_turns() {
-  local name="$1"; shift
-  : >"$OUT/$name.raw"
-  {
-    local n=0 t i limit
-    for t in "${TURNS[@]}"; do
-      n=$((n + 1))
-      jq -nc --arg c "$t" '{type: "user", message: {role: "user", content: $c}}'
-      limit="$TIMEOUT"; case "$t" in /*) limit=30 ;; esac
-      i=0
-      while [ "$i" -lt "$limit" ] && [ "$(results_count "$OUT/$name.raw")" -lt "$n" ]; do sleep 2; i=$((i + 2)); done
-    done
-    jq -nc '{type: "user", message: {role: "user", content: "/providers"}}'
-    i=0
-    while [ "$i" -lt 120 ] && ! grep -q 'shadowLeaks' "$OUT/$name.raw"; do sleep 2; i=$((i + 2)); done
-  } | "$TIMEOUT_BIN" "$TIMEOUT" claude -p --plugin-dir "$ROOT" --settings "$SETTINGS" --agents "$AGENTS" \
-    --input-format stream-json --output-format stream-json --verbose \
-    --allowedTools Bash,Agent "$@" >"$OUT/$name.raw" 2>"$OUT/$name.err"
-  grep '^{' "$OUT/$name.raw" >"$OUT/$name.jsonl" || true
+# answered <file> <n> [markers...]: the session has n results, and every
+# marker has reached one.
+answered() {
+  local f="$1" n="$2"; shift 2
+  [ "$(results_count "$f")" -ge "$n" ] && markers_seen "$f" "$@"
 }
 
-# Model-usage keys allowed besides the session's own (a regex; the switch
-# case adds the subscription model).
-ALLOW_USAGE='^$'
+# wait_until <seconds> <command...>: polls the command until it succeeds or
+# the time is up.
+wait_until() {
+  local limit="$1" i=0; shift
+  while [ "$i" -lt "$limit" ] && ! "$@"; do sleep "$POLL"; i=$((i + POLL)); done
+}
 
-# check <name> <routed model ids, space-separated> <main is routed: 0|1> <markers...>
+user_turn() { jq -nc --arg c "$1" '{type: "user", message: {role: "user", content: $c}}'; }
+
+# session <name> <markers, space-separated> <turn>... -- [claude args...]: one
+# session sending each turn once the previous one has a result (a slash
+# command waits at most SLASH_WAIT). After the last turn it also waits until
+# every marker has reached a reply (a background subagent's result arrives as
+# a later turn), then sends /providers, so the counters are read after all
+# routed work; then stdin closes and the session ends.
+session() {
+  local name="$1" markers="$2"; shift 2
+  local turns=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do turns+=("$1"); shift; done
+  [ $# -gt 0 ] && shift
+  local raw="$OUT/$name.raw"
+  : >"$raw"
+  {
+    local n=0 t limit last
+    for t in "${turns[@]}"; do
+      n=$((n + 1))
+      user_turn "$t"
+      limit="$TIMEOUT"; case "$t" in /*) limit="$SLASH_WAIT" ;; esac
+      last=""; [ "$n" -eq "${#turns[@]}" ] && last="$markers"
+      wait_until "$limit" answered "$raw" "$n" $last
+    done
+    user_turn "/providers"
+    wait_until "$PROVIDERS_WAIT" grep -q 'shadowLeaks' "$raw"
+  } | "$TIMEOUT_BIN" "$TIMEOUT" claude -p --plugin-dir "$ROOT" --settings "$SETTINGS" --agents "$AGENTS" \
+    --input-format stream-json --output-format stream-json --verbose \
+    --allowedTools Bash,Agent "$@" >"$raw" 2>"$OUT/$name.err"
+  grep '^{' "$raw" >"$OUT/$name.jsonl" || true
+}
+
+# Model-usage keys allowed besides the session's own (a regex): none, or the
+# subscription models for the switch case.
+NO_OTHER_USAGE='^$'
+SUBSCRIPTION_USAGE='^claude-'
+
+# check <name> <routed model ids, space-separated> <main is routed: 0|1>
+#   <allowed other usage keys (regex)> <markers...>
 check() {
-  local name="$1" routed="$2" mainRouted="$3"; shift 3
+  local name="$1" routed="$2" mainRouted="$3" allowUsage="$4"; shift 4
   local f="$OUT/$name.jsonl" err="" m r
   [ -s "$f" ] || { fail "$name" "no output (see stderr: $(head -c 300 "$OUT/$name.err" | tr '\n' ' '))"; return; }
   local reply; reply="$(jq -r 'select(.type=="result") | .result' "$f")"
@@ -180,7 +189,7 @@ check() {
   # Zero leak: counters, usage, transcript.
   jq -r 'select(.type=="result") | .result' "$f" | grep -q 'shadowLeaks 0,' || err="$err shadowLeaks not 0 (or /providers missing);"
   local mainModel; mainModel="$(jq -r 'select(.type=="system" and .subtype=="init") | .model' "$f" | head -1)"
-  local bad; bad="$(jq -r --arg main "$mainModel" --arg sh "$SHADOW" --arg allow "$ALLOW_USAGE" 'select(.type=="result") | .modelUsage // {} | to_entries[]
+  local bad; bad="$(jq -r --arg main "$mainModel" --arg sh "$SHADOW" --arg allow "$allowUsage" 'select(.type=="result") | .modelUsage // {} | to_entries[]
       | select(.key != $main and ((.key | test($allow)) | not) and (.key != $sh or (.value.inputTokens + .value.outputTokens + .value.cacheReadInputTokens + .value.cacheCreationInputTokens) > 0 or .value.costUSD > 0)) | .key' "$f" | sort -u | tr '\n' ' ')"
   [ -z "$bad" ] || err="$err unexpected usage entries: $bad;"
   local sid; sid="$(jq -r 'select(.type=="result") | .session_id' "$f" | head -1)"
@@ -216,9 +225,9 @@ for c in $CASES; do
       # Main loop routed, one tool round trip.
       for p in "${PROVIDERS[@]}"; do
         set -- $p
-        mk="SMOKE_MAIN_$(echo "$1" | tr a-z A-Z)"
-        run "main-$1" "Use the Bash tool to run \`echo $mk\` and reply with only its output." "$mk" --model "$2"
-        check "main-$1" "$2" 1 "$mk"
+        mk="SMOKE_MAIN_$(upper "$1")"
+        session "main-$1" "$mk" "Use the Bash tool to run \`echo $mk\` and reply with only its output." -- --model "$2"
+        check "main-$1" "$2" 1 "$NO_OTHER_USAGE" "$mk"
       done
       ;;
     turns)
@@ -226,11 +235,12 @@ for c in $CASES; do
       # thread across turns.
       for p in "${PROVIDERS[@]}"; do
         set -- $p
-        u="$(echo "$1" | tr a-z A-Z)"
-        TURNS=("Use the Bash tool to run \`echo SMOKE_T1_$u\` and reply with only its output." \
-          "Now use the Bash tool to run \`echo SMOKE_T2_$u\` and reply with only its output.")
-        run_turns "turns-$1" --model "$2"
-        check "turns-$1" "$2" 1 "SMOKE_T1_$u" "SMOKE_T2_$u"
+        u="$(upper "$1")"
+        session "turns-$1" "" \
+          "Use the Bash tool to run \`echo SMOKE_T1_$u\` and reply with only its output." \
+          "Now use the Bash tool to run \`echo SMOKE_T2_$u\` and reply with only its output." \
+          -- --model "$2"
+        check "turns-$1" "$2" 1 "$NO_OTHER_USAGE" "SMOKE_T1_$u" "SMOKE_T2_$u"
       done
       ;;
     switch)
@@ -239,31 +249,30 @@ for c in $CASES; do
       # step continues a thread the router did not see: it is rebuilt from
       # the session history.
       set -- ${PROVIDERS[0]}
-      u="$(echo "$1" | tr a-z A-Z)"
-      TURNS=("Use the Bash tool to run \`echo SMOKE_SW1_$u\` and reply with only its output." \
+      u="$(upper "$1")"
+      export ANTHROPIC_CUSTOM_MODEL_OPTION="$2"
+      session switch "" \
+        "Use the Bash tool to run \`echo SMOKE_SW1_$u\` and reply with only its output." \
         "/model ${SMOKE_MAIN_MODEL:-haiku}" \
         "Use the Bash tool to run \`echo SMOKE_SW2_$u\` and reply with only its output." \
         "/model $2" \
-        "Use the Bash tool to run \`echo SMOKE_SW3_$u\` and reply with only its output.")
-      export ANTHROPIC_CUSTOM_MODEL_OPTION="$2"
-      run_turns switch --model "$2"
+        "Use the Bash tool to run \`echo SMOKE_SW3_$u\` and reply with only its output." \
+        -- --model "$2"
       unset ANTHROPIC_CUSTOM_MODEL_OPTION
-      ALLOW_USAGE='^claude-'
-      check switch "$2" 1 "SMOKE_SW1_$u" "SMOKE_SW2_$u" "SMOKE_SW3_$u"
-      ALLOW_USAGE='^$'
+      check switch "$2" 1 "$SUBSCRIPTION_USAGE" "SMOKE_SW1_$u" "SMOKE_SW2_$u" "SMOKE_SW3_$u"
       ;;
     errors)
       # Errors answered locally, at no cost: an unknown custom endpoint.
-      run errors-endpoint "Say hi." "unknown custom endpoint" --model "custom:smoke-missing:m"
+      session errors-endpoint "unknown custom endpoint" "Say hi." -- --model "custom:smoke-missing:m"
       check_error errors-endpoint 'unknown custom endpoint "smoke-missing"'
       ;;
     sub)
       # Main on the subscription, one routed subagent per provider.
       for p in "${PROVIDERS[@]}"; do
         set -- $p
-        mk="SMOKE_SUB_$(echo "$1" | tr a-z A-Z)"
-        run "sub-$1" "Use the Agent tool with subagent_type smoke-$1 and the task: run \`echo $mk\` with Bash and return its output. Then reply with only the output the agent returned." "$mk" ${MAINARGS[@]+"${MAINARGS[@]}"}
-        check "sub-$1" "$2" 0 "$mk"
+        mk="SMOKE_SUB_$(upper "$1")"
+        session "sub-$1" "$mk" "Use the Agent tool with subagent_type smoke-$1 and the task: run \`echo $mk\` with Bash and return its output. Then reply with only the output the agent returned." -- ${MAINARGS[@]+"${MAINARGS[@]}"}
+        check "sub-$1" "$2" 0 "$NO_OTHER_USAGE" "$mk"
       done
       ;;
     parallel)
@@ -271,14 +280,14 @@ for c in $CASES; do
       set -- ${PROVIDERS[0]}; a1="$1" m1="$2"
       if [ ${#PROVIDERS[@]} -gt 1 ]; then set -- ${PROVIDERS[1]}; fi
       a2="$1" m2="$2"
-      run parallel "In ONE message, make two Agent tool calls in parallel: subagent_type smoke-$a1 with the task 'run \`echo SMOKE_PAR_ONE\` with Bash and return its output', and subagent_type smoke-$a2 with the task 'run \`echo SMOKE_PAR_TWO\` with Bash and return its output'. When both are done, reply with both outputs on one line." "SMOKE_PAR_ONE SMOKE_PAR_TWO" ${MAINARGS[@]+"${MAINARGS[@]}"}
-      check parallel "$(printf '%s\n' "$m1" "$m2" | sort -u | tr '\n' ' ')" 0 SMOKE_PAR_ONE SMOKE_PAR_TWO
+      session parallel "SMOKE_PAR_ONE SMOKE_PAR_TWO" "In ONE message, make two Agent tool calls in parallel: subagent_type smoke-$a1 with the task 'run \`echo SMOKE_PAR_ONE\` with Bash and return its output', and subagent_type smoke-$a2 with the task 'run \`echo SMOKE_PAR_TWO\` with Bash and return its output'. When both are done, reply with both outputs on one line." -- ${MAINARGS[@]+"${MAINARGS[@]}"}
+      check parallel "$(printf '%s\n' "$m1" "$m2" | sort -u | tr '\n' ' ')" 0 "$NO_OTHER_USAGE" SMOKE_PAR_ONE SMOKE_PAR_TWO
       ;;
     background)
       # Main keeps working on the subscription while a routed subagent runs.
       set -- ${PROVIDERS[0]}
-      run background "Start the Agent tool with subagent_type smoke-$1 and run_in_background true, task: 'run \`sleep 5; echo SMOKE_BG_SUB\` with Bash and return its output'. While it runs, use the Bash tool yourself to run \`echo SMOKE_BG_MAIN\`. Then wait for the agent's result and reply with both outputs on one line." "SMOKE_BG_SUB SMOKE_BG_MAIN" ${MAINARGS[@]+"${MAINARGS[@]}"}
-      check background "$2" 0 SMOKE_BG_SUB SMOKE_BG_MAIN
+      session background "SMOKE_BG_SUB SMOKE_BG_MAIN" "Start the Agent tool with subagent_type smoke-$1 and run_in_background true, task: 'run \`sleep 5; echo SMOKE_BG_SUB\` with Bash and return its output'. While it runs, use the Bash tool yourself to run \`echo SMOKE_BG_MAIN\`. Then wait for the agent's result and reply with both outputs on one line." -- ${MAINARGS[@]+"${MAINARGS[@]}"}
+      check background "$2" 0 "$NO_OTHER_USAGE" SMOKE_BG_SUB SMOKE_BG_MAIN
       # Main's own Bash ran before the subagent finished (in parallel).
       f="$OUT/background.jsonl"
       mainAt="$(jq -s 'to_entries | map(select(.value.type=="assistant" and .value.parent_tool_use_id==null and ([.value.message.content[]? | select(.type=="tool_use" and .name=="Bash")] | length) > 0)) | .[0].key // -1' "$f")"
