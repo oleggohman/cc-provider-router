@@ -264,6 +264,14 @@ Claude Code still runs tools, permissions, hooks, subagents and the
 transcript; only the model call moves. The engine behaviour this relies on is
 written up in [`docs/design-notes.md`](docs/design-notes.md).
 
+For routed models the system prompt's opening identity sentence ("You are
+Claude Code.", "You are Claude Code, Anthropic's official CLI for Claude.",
+"You are a Claude agent, built on Anthropic's Claude Agent SDK.") is rewritten
+to "You are a Coding agent" for every provider — the model is not Claude; the
+rest of the prompt is sent unchanged. Only those engine sentences are
+rewritten: a subagent prompt of your own that happens to start with "You are
+a Claude ..." is sent as written.
+
 ## Limits
 
 - **No streaming** for routed models: a reply appears when it is complete.

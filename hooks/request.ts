@@ -3,7 +3,9 @@
 // context_management, safeguards, thread, diagnostics, stream, thinking,
 // output_config, ...) are dropped by the allow list. The model is replaced and
 // max_tokens comes from the routed model's limits (limits.ts), not the
-// captured value (the engine sizes it for an unknown model id).
+// captured value (the engine sizes it for an unknown model id). The system
+// prompt's Claude identity sentence is rewritten to a neutral one: a routed
+// model is not Claude.
 
 export type ProviderRequest = {
   model: string
@@ -58,10 +60,37 @@ function flattenTools(tools: any[], loaded: Set<string>): any[] {
     })
 }
 
+// The engine's system prompt opens by identifying the agent as Claude-based
+// ("You are Claude Code.", "You are Claude Code, Anthropic's official CLI for
+// Claude.", "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+// and its truncated "...Claude Agent" form). A routed model is not Claude, so
+// exactly those openers, trailing period included, are replaced with a
+// neutral identity for every provider; the rest of the prompt is sent as
+// captured. Only the known engine sentences match, ended by a period or by
+// the end of the line: a user-authored prompt that merely starts with "You
+// are a Claude ..." or "You are Claude Code Reviewer ..." is not an identity
+// claim and stays as written.
+const CLAUDE_IDENTITY =
+  /^(?:You are Claude Code(?:, Anthropic's official CLI for Claude)?|You are a Claude agent, built on Anthropic's Claude Agent(?: SDK)?)(?:\.|(?=\n|$))/
+const CODING_AGENT = 'You are a Coding agent'
+
+function rewriteIdentity(text: string): string {
+  return text.replace(CLAUDE_IDENTITY, CODING_AGENT)
+}
+
+// `system` is a string or a list of {type: 'text'} blocks (a billing-header
+// block may sit before the identity one); other shapes pass through.
+function rewriteSystem(system: unknown): unknown {
+  if (typeof system === 'string') return rewriteIdentity(system)
+  if (!Array.isArray(system)) return system
+  return system.map(b => (b?.type === 'text' && typeof b.text === 'string' ? { ...b, text: rewriteIdentity(b.text) } : b))
+}
+
 export function buildRequest(body: any, model: string, maxTokens: number): ProviderRequest {
   const messages: any[] = Array.isArray(body?.messages) ? body.messages : []
   const request: ProviderRequest = { model, max_tokens: maxTokens, messages: flattenMessages(messages) }
   for (const k of KEEP) if (body?.[k] !== undefined) (request as any)[k] = body[k]
+  if (request.system !== undefined) request.system = rewriteSystem(request.system)
   if (Array.isArray(body?.tools) && body.tools.length) {
     const tools = flattenTools(body.tools, referencedTools(messages))
     if (tools.length) request.tools = tools
