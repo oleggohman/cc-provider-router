@@ -217,4 +217,57 @@ describe('routed steps across a thread', () => {
     const sent = JSON.parse(p.calls[1]!.init.body)
     expect(sent.messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: first.result.answer }] })
   })
+
+  test('a cancelled step (Esc) records nothing: the next continue builds on the last recorded turn', async () => {
+    resetShadow()
+    const cancelledBody = {
+      model: 'provider-router-shadow',
+      thread: { type: 'continue', previous_message_id: 'msg_hook_1' },
+      system: [BILLING],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'CANCELLED-INPUT' }] }],
+    }
+    const eng = threadEngine([createBody, cancelledBody, continueBody])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const esc = new AbortController()
+    const bodies: string[] = []
+    // Step 1's provider call never answers; Esc is pressed while it runs.
+    const fetch = async (url: string, init: any) => {
+      bodies.push(init.body)
+      if (bodies.length === 2) {
+        esc.abort()
+        return new Promise<never>(() => {})
+      }
+      return p.fetch(url, init)
+    }
+    const threads = createThreads()
+    const live = new AbortController().signal
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: live }, threads))
+    const cancelled = await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: esc.signal }, threads))
+    expect(cancelled.chunks).toEqual([])
+    expect(cancelled.result.answer).toBe('')
+    const third = await drain(routedStep(e(2), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: live }, threads))
+    expect(third.result.answer).toBe('SMOKE')
+    const sent = JSON.parse(bodies[2]!)
+    expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(sent.messages[1].content).toEqual(REPLY)
+    expect(JSON.stringify(sent)).not.toContain('CANCELLED-INPUT')
+    expect(eng.network.length).toBe(0)
+  })
+
+  test('a timed-out step is recorded like an error: its text is the assistant turn', async () => {
+    resetShadow()
+    const eng = threadEngine([createBody, continueBody])
+    const p = provider([{ status: 200, text: textReply }])
+    let n = 0
+    const fetch = async (url: string, init: any) => (++n === 1 ? new Promise<never>(() => {}) : p.fetch(url, init))
+    // A sleep that fires at once: the timer wins the first call.
+    const fire = async () => {}
+    const threads = createThreads()
+    const signal = new AbortController().signal
+    const first = await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: fire, signal, timeoutMs: 5 }, threads))
+    expect(first.result.answer).toContain('timed out')
+    await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal }, threads))
+    const sent = JSON.parse(p.calls[0]!.init.body)
+    expect(sent.messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: first.result.answer }] })
+  })
 })

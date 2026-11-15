@@ -45,6 +45,18 @@ describe('buildRequest', () => {
     const { tools: _, ...noTools } = fx.textOnly
     expect('tools' in buildRequest(noTools, openai, {}).request).toBe(false)
   })
+
+  test('a missing or malformed body gives a minimal request, never a throw', () => {
+    for (const body of [undefined, null, 'not json', { messages: 'x', tools: 'y' }, { tools: [] }]) {
+      for (const r of [anthropic, openai]) {
+        const { request } = buildRequest(body, r, {})
+        expect(request.model).toBe(r.model)
+        expect(request.messages).toEqual([])
+        expect('tools' in request).toBe(false)
+        expect(request.max_tokens).toBe(maxOutputTokens(r))
+      }
+    }
+  })
 })
 
 describe('deferred tools / tool search', () => {
