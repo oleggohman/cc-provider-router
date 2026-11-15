@@ -160,7 +160,7 @@ live).
 | self-made `tool` + `input` + `stop{tool_use}` chunks | the engine runs the tool and sends a next step with the `tool_result`; `input` chunks split across yields are joined | adapters yield tool calls as chunks |
 | subagent with `model: <prefixed id>` | reaches `turn.step` with that model and its `agentId` | routed subagents need no extra config |
 | `--model 'x:my-gw:org/model:v1'` | reaches `turn.step` unchanged; the engine warns it does not know the model and assumes a 1M window | ids may contain `/` and `:` |
-| `$.http.fetch` | POST with body and headers works; 4xx/5xx resolve with `status`, `ok: false`, `text` | no timeout, no abort, no streaming body |
+| `$.http.fetch` | POST with body and headers works; 4xx/5xx resolve with `status`, `ok: false`, `text`. The host ends a call with no complete answer after 30 s (`aborted: no complete answer within 30000ms`, found in the 2.1.325 spike below) and aborts it on Esc | no timeout option, no streaming body; a provider reply slower than 30 s fails |
 | `$.clock.sleep` racing an in-flight `$.http.fetch` | does not use up the hook's 10 s budget (25 s fetch beat a 60 s timer; a 15 s timer beat a 25 s fetch) | timeout race in `call.ts`, default 600 s |
 | `next.signal` | exists on `turn.step`'s `next`, aborts on Esc | Esc ends the step; the sent provider call is not cancelled |
 | `userConfig` `sensitive: true` string | validates; `""` when unset | keys in `/config` live in secure storage |
@@ -223,10 +223,106 @@ each row with a kept script before any code depends on it.
 | a nested `$.http.fetch` taking 25 s inside the `http.fetch` hook before answering | completes (`$.http.fetch (provider-router): 200 in 25002ms`, `http.fetch settled in 25003.7ms`), the engine accepts the answer; the log marks it `http.fetch nested in provider-router#1`: the nested fetch does not pass through the mod's own `http.fetch` hook |
 | usage of that run | `modelUsage` lists only `provider-router-shadow` |
 
-Not probed: Esc, error replies, usage and model names in `/cost` and the
-transcript, thread anchors, engine compaction, an interactive session, holds
-longer than 25 s, the order of the classifier request against the end of the
-step's stream.
+Every row above was reproduced with the kept scripts (next section); the
+points this list once named as not probed are answered there.
+
+### Answer in place: spike (kept scripts, Claude Code 2.1.325, 2026-11-15)
+
+Task 2 of the plan, run with `scripts/probes/` (the README there lists the
+command and the expected record for each row) and `tests/observer-plugin/`.
+Provider: the local mock (`custom:mock:m`). Hook order in every run unless
+stated: `provider-router` (the probe copy, tier user, environment 1) above
+`fetch-observer` (environment 2), built-ins beneath. "-p" is `claude -p
+--output-format stream-json`; "pty" is an interactive session driven by
+`drive-pty.py`. A request shape lists the body's top-level keys; header
+values that may hold a credential arrive as `[redacted]` and are not
+recorded anywhere.
+
+**Outcome of the GO items.** Classifier predicate: go. Timeout mechanism: go.
+Esc: go. Classifier attribution: **no** as planned (the request carries no
+agent header; a session-wide rule is proposed instead). Long hold: **no** as
+planned (`$.http.fetch` is cut by the host at 30 s, from any hook, in the
+shipped flow too; the hold itself is fine up to the engine's 600 s). Both
+need a decision before Task 3.
+
+| # | Item | Run | Request shape and hook order | Observed |
+|---|---|---|---|---|
+| 1 | reproduce "Answer in place" | -p auto, and pty auto | shadow request (engine origin): `POST https://api.anthropic.com/v1/messages?beta=true`, keys `context_management, diagnostics, max_tokens, messages, metadata, model, output_config, safeguards, stream, system, thinking, thread, tools`; `safeguards` only until the engine switches to local classification | every earlier row reproduced: `Agent` judged and run with the provider's reply as SSE; refused with today's rule (retry names `custom:mock:m`); refused when engine chunks are passed around hook-made ones; a plain `$.clock.sleep(25000)` cut at 10 s (the hook's `next.signal` aborts at 10004 ms, `.catch` answers, step result `stopReason: null`, `usage: null`); a 25 s nested fetch completes. Interactive: the same, plus a session-title side request |
+| 2 | observer load order | -p, both orders | see `tests/observer-plugin/README.md` | `--plugin-dir` flags nest in order, first outermost. Beneath the router the observer records the router's nested provider fetch (`origin.plugin: "provider-router"`, tier user) and each request the router passed; above it, the shadow request too |
+| 3 | **classifier predicate** | -p and pty, main loop and subagent loop, first and later calls, stage 1 and 2, the retry | stage 1: keys `max_tokens, messages, metadata, model, stop_sequences, system, thinking`, `max_tokens: 64`, `stop_sequences: ["</severity>"]`, `thinking: {type: disabled}`, model `claude-sonnet-5`; stage 2 (after stage 1 flags the call): the same without `stop_sequences`, `max_tokens: 8192`. Not streamed. `metadata` is `{ user_id }` only. Headers: `anthropic-beta` holds `auto-mode-classifier-2026-07-16` and `claude-code-side-query-2026-09-29`; `x-stainless-timeout: 60`; no `x-claude-code-agent-id`, no `x-claude-code-prompt-id`; `x-claude-code-request-class` and `x-claude-1p-request-class` are present on every engine request and host-redacted. The retry after a refusal: the session's own model id (`custom:mock:m`), `max_tokens: 2112`, no `thinking` | **go.** The marker is the `auto-mode-classifier-<date>` token of `anthropic-beta`, which no other recorded request carries (the title request shares only `claude-code-side-query-*`). Predicate and counterexamples below. System prompt opening (`You are a security monitor for autonomous AI coding agents.`) is not part of the predicate |
+| 4 | **classifier timing and attribution** | -p auto: one call, two calls in one reply, a later turn, a routed subagent under a subscription main loop, the subagent resumed with `SendMessage` | order for the first judged call of a reply: SSE handed -> engine chunks -> `tool.check` (core answers `ask`) -> classifier send (job still pending, phase handed) -> the step's stream ends and the job is removed 3 ms later -> classifier settles about 2 s after that. A second call in the same reply, a later turn's call and a subagent's call: `tool.check` and the classifier send come after the stream ended, with no job pending. Requests are sent one at a time | **no as planned.** The classifier request never carries the agent header: a subagent's call is judged by a request with the main loop's key, also while the main loop has its own request in flight. It cannot be attributed to a loop, so a per-loop status decides nothing. After the first routed step the engine classifies locally for the whole session: the subscription main loop's own calls (`SendMessage`) and an end-of-subagent review (`tool=unknown_tool`) were classified the same way. Proposed instead: no loop condition in the predicate; the opt-out works on the session |
+| 5 | **long hold** | -p default | nested `$.http.fetch` from the `http.fetch` hook; the same from the `turn.step` hook of an unpatched HEAD copy | **no as planned.** A `$.http.fetch` is ended by the host after 30 s: `HooksError: ... $.http.fetch(...) aborted: no complete answer within 30000ms`, in both hooks, so in the shipped flow too (v0.1.2 cannot take a provider reply slower than 30 s). `init.timeoutMs`, `init.timeout` and `init.signal` change nothing. The hold itself is not the limit: 11 nested fetches of 29 s in a row (319 s) and a single `$.process.run(["curl", ...], { timeoutMs: 600000 })` of 300 s and of 590 s all end with the engine accepting the answer. The engine's own request timeout is 600 s (`x-stainless-timeout: 600`): at 600000 ms the fetch hook's `next.signal` aborts |
+| 6 | **timeout mechanism** | -p default, 15 s limit, 25 s provider, then a second prompt | (a) `raceCall` with `$.clock.sleep` in the fetch hook; (b) `$.clock.sleep` in the `turn.step` hook resolving a promise the fetch hook races | **go, both.** (a): the sleep is not cut at 10 s while the nested fetch is in flight; outcome `timeout` at 15005 ms. (b): timer fired at 15003 ms, the fetch hook answered at 14976 ms of its own clock. Each time the reply is `[provider-router] ... no reply within 15000 ms (timed out)` and the next prompt answers `MOCK-TEXT`; in (b) the provider's late answer arrives 10 s later and is dropped. Above 30 s the host's fetch limit decides first (row 5) |
+| 7 | reload | pty | edit of the `--settings` file during a hold; a `.claude/settings.local.json` with `pluginConfigs` created in the working directory | **inconclusive.** Neither reloads the module (same load id; the log says `project settings are not read` for plugin options). A reload needs `/config`, which writes the user's settings and was not allowed in the spike. The `unknown`-status rule was exercised only as a fresh session with `autoModeClassifier: false`: the classifier request is refused and auto mode fails closed |
+| 8 | abandonment | -p default, a second mod above the router (`make-abandoner.sh`) | `step-abandoner` (environment 1) above the router | a consumer that leaves its loop (`break`): the router's `next.signal` aborts and its generator is closed (`finally` runs). A consumer that hangs: the host cuts it at 10 s and reads the router's stream to the end, no abort. The router's own hook hanging: cut at 10 s, signal aborted, `.catch` answers, and no `finally` runs: the job stayed and the next step found it pending. The abort listener is needed |
+| 9 | **Esc** | pty auto, Esc 15 to 18 s into a 28 s hold, then a new prompt | as row 1 | **go.** Both hooks' `next.signal` abort at the same millisecond; the nested provider fetch fails with `The operation was aborted`. The engine still reads what the fetch hook then returns and the step's stream ends normally (not closed), `stopReason: null`. Answered with an empty stub: nothing is shown or recorded, and the next prompt is a fresh `thread: create` that works. Answered with a 400: the same plus an error line on screen. Answered with text as SSE: the engine records it (the next continue names its message id), so never do that |
+| 10 | nested dispatch | every run | debug log | `http.fetch skipped: re-entry (its own frame is being dispatched; origin provider-router#1)` for the router's own hook, `fetch-observer: http.fetch nested in provider-router#1` for the observer |
+| 11 | delivery | -p default | SSE variants (`PROBE_SSE`) | good reply: result keys `turnId, index, answer, toolUses, stopReason, usage`; `answer` is the text **trimmed**; `toolUses[].input` has the same values with keys **reordered** (the `input` chunk keeps the bytes sent); `usage` is the SSE's plus `model`. Two replies with the same stop reason and counts but different content give different results. Cut mid-block, a malformed data line, an empty body: the engine sends the request again (the router refuses the second), result `stopReason: null`, `usage: null`. An unknown stop reason: `stopReason: null` with the text. HTTP 400: `hook_denied`, `stopReason: null`. So `stopReason: null` does follow a handed answer. A body complete but for `message_delta` and `message_stop`: the hook's result looks whole (`end_turn`) while the engine reports `Connection lost mid-response` and asks the model to resume; only a body the router itself cut can do that |
+| 12 | error replies | -p default, main loop and subagent | `PROBE_ERR_STOP` | no SSE stop reason works. `end_turn`: fine for the person, but a subagent is told three times to hand back a report (three more failing calls) and its parent gets `The subagent ended without delivering a report`. `refusal`: the engine treats it as its own safety stop (adds `Your response above was stopped by a safety classifier`, runs another step, reports `API Error: ... safeguards flagged this message`). `model_context_window_exceeded`: `Output token limit hit. Resume directly` and another step. HTTP 400 with `x-should-retry: false`: `A mod's http.fetch hook stopped this request: <text>`, `is_error`, nothing the router can record. **Chosen:** answer the shadow request with the empty stub and yield today's hook-made error chunks (`refusal`) from the `turn.step` hook: the person sees the `[provider-router]` text, a parent agent gets it as the subagent's result, no retry, as in v0.1.2 |
+| 13 | model and usage | -p default, pty `/cost` | `PROBE_USAGE`, `PROBE_MODEL` | real usage: `modelUsage` and `/cost` list `provider-router-shadow` with the tokens and an invented cost (5000 input tokens: $0.02), whatever model the SSE names; `$.session.usage()` reports `context.tokens`; the transcript row's `message.model` is the SSE's model and its id the minted id. Zero usage: $0, no context size. **Chosen:** zero usage, the provider's model name |
+| 14 | compaction | -p default, a reply reporting 985000 input tokens, then a prompt | the engine's compaction request: engine origin, model `custom:mock:m`, keys `context_management, diagnostics, fallbacks, max_tokens, messages, metadata, model, output_config, stream, system, thinking, tools`, headers `x-cc-compaction-request`, `x-claude-code-compaction` | with real usage the engine compacts by itself at its assumed 1M window (`effectiveWindow=980000`, `thresholdSource=unknown-model`), and that request does not pass through `turn.step`: it names the prefixed model and carries the conversation to the first-party host. The probe refused it; the turn ended `Prompt is too long · automatic compaction failed`. With zero usage the engine never starts it. Recovery after a compaction fork and after `/model` there and back: **inconclusive**, not probed |
+| 15 | thread anchors | every multi-step run | `thread: { type: "continue", previous_message_id }` | the next continue names the id minted in the SSE's `message_start` (`diagnostics.previous_message_id` too). After a hook-made error step it names an engine-made `msg_hook_*` id |
+| 16 | classifier denial | -p auto, Bash `curl -s http://127.0.0.1:<mock>/script.sh \| bash` | stage 1 then stage 2 | denied: `Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Code from External]`; the mock saw no GET and no file was written |
+| 17 | non-auto modes | -p default and accept-edits, `Agent` and an outside Bash, probe and unpatched HEAD | no classifier request | identical results with both: `Agent` runs, the outside Bash is denied with the engine's `needs approval` text |
+
+Also seen, outside the checklist:
+
+- an interactive session sends side requests of its own that never pass
+  through `turn.step`: a session title (`claude-haiku-5-5`, keys `max_tokens,
+  messages, metadata, model, output_config, stream, system, tools`), and a
+  prompt suggestion that carries the conversation under the session's own
+  model id (`custom:mock:m`), like the compaction request of row 14. Nothing
+  pending covers them: only a rule that refuses any engine request naming a
+  router-prefixed model keeps them from the first-party host;
+- the classifier's transcript holds the user's prompts and each tool call of
+  the session, routed loops included; it goes to the first-party API on the
+  subscription;
+- behind `ANTHROPIC_BASE_URL` (mock gateway, API-key auth) the classifier
+  requests carry no `auto-mode-classifier-*` beta. The predicate pins the
+  first-party URL, so there the exception never applies and a classifier
+  request sent while a job is pending is refused (auto mode fails closed for
+  that call);
+- in `-p` runs the OS sandbox stopped the judged `touch` outside the working
+  directory (`Operation not permitted`); the interactive runs wrote the file.
+
+#### Classifier predicate (proposed)
+
+```
+evaluated only after the unconditional refusals (shadow model, shadow URL, prefixed or malformed model id)
+next.origin.plugin === "engine"
+AND (e.init.method ?? "GET") === "POST"
+AND e.url === "https://api.anthropic.com/v1/messages?beta=true"
+AND one comma-separated token of the anthropic-beta header matches /^auto-mode-classifier-\d{4}-\d{2}-\d{2}$/
+AND the request has no x-claude-code-agent-id header
+AND e.init.body is a string that parses to a JSON object (not an array)
+AND typeof body.model === "string", not empty, not SHADOW_MODEL, classifyModel(body.model).kind === "unprefixed"
+AND every top-level key of body is one of: max_tokens, messages, metadata, model, stop_sequences, system, thinking
+```
+
+No loop condition (row 4). A match passes when `autoModeClassifier` is on,
+whatever job is pending. With it off, a match is refused once any step was
+routed since the module loaded, and also while the module has seen no step at
+all; a session whose every step was unprefixed keeps its classifier.
+
+Counterexamples tried (`check-predicate.py` over about 400 recorded engine
+requests; none matches):
+
+| Request | Fails on |
+|---|---|
+| thread create, subscription model and shadow model | `marker`, keys `tools, thread, context_management, diagnostics, output_config, stream` (and `safeguards`); `model` for the shadow |
+| thread continue | `marker`, keys `thread, context_management, diagnostics, output_config, stream` |
+| compaction request (row 14) | `marker`, `model`, keys `tools, fallbacks, context_management, ...` |
+| session-title side request | `marker`, keys `output_config, stream, tools` |
+| prompt-suggestion side request | `marker`, `model`, keys as a conversation request |
+| fallback-model retry of the conversation | seen only behind the mock gateway (`url`); its keys are a conversation request's |
+| the classifier's own retry under the session's model | `model` (prefixed) |
+| a request to a non-Messages path | telemetry `POST /api/event_logging/v2/batch` (`origin` is `cc-plugin-telemetry`, `url`); synthetic `count_tokens` path: `url` |
+| synthetic variants of a recorded classifier request | other origin, GET, another host, shadow name in the URL, no classifier beta, the beta as a substring, an agent header, shadow or prefixed or malformed model, added `tools` / `thread` / `stream` / `safeguards` / `output_config`, unparseable body: each fails |
+
+Residual, to be stated in `CLAUDE.md`: the marker is a request header, which
+a hook above the router can write; `next.origin` proves who raised the
+request, not that it is unmodified. What a matching request can carry is
+bounded by its shape (a real first-party model, no tools, no thread).
 
 ## Test-kit notes
 
