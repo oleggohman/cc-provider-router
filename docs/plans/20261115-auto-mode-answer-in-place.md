@@ -9,7 +9,7 @@
 - ⚠️ **Task 2 result (2026-11-15): the plan is stopped for the user's decision.** The spike is recorded in `docs/design-notes.md`, "Answer in place: spike". Classifier predicate, timeout mechanism and Esc: go. Two GO items were answered no as planned:
   - **Attribution.** The classifier request carries no agent header, so it cannot be tied to a loop. This plan is revised to a session-wide rule (no loop condition in the predicate; the opt-out refuses classifier requests of the whole session once any step was routed). Decision needed: accept that, or stop.
   - **Long hold.** The host ends any `$.http.fetch` after 30 s (`no complete answer within 30000ms`), from the `http.fetch` hook and from the `turn.step` hook alike, so `v0.1.2` has the same limit today. The hold itself works to just under the engine's 600 s request timeout. Decision needed: (A) ship answer in place with the 30 s provider limit documented as it stands; or (B) add a task that moves the provider call to `$.process.run(["curl", ...])` (works for 590 s in the spike; CLI only; the key must go through stdin or a config read from stdin, never argv); or stop.
-  Tasks 3 to 11 below are revised for the findings and assume (A) and the session-wide rule; they do not start before the decision.
+- **User decisions (2026-11-15):** the session-wide classifier rule is accepted; for the long hold, option (B) is taken: provider calls go through a `curl` child process instead of `$.http.fetch`, so a reply may take up to the 570 s timeout instead of 30 s. That is the new Task 7; Tasks 8 to 13 follow it. `$.http.fetch` stays as the fallback when `curl` cannot be started, with the 30 s limit documented for that case.
 - **Non-goals.** Streaming of routed replies; extended thinking; any hook that answers `tool.check` with `allow`.
 
 ## Context (from discovery)
@@ -39,7 +39,7 @@
 - **unit tests**: `claude plugin test .`, one `*.test.ts` per module. `routedStep` and the fetch-side handler are tested directly with injected `fetch` / `sleep` / `signal` (the kit refuses `$.http.fetch` from a test's own hooks).
 - **fail-closed tests**: every change to `hooks/shadow.ts` gets tests asserting zero network calls for anything that could be a shadow, a routed conversation, or a router-prefixed model id.
 - **local end-to-end (new, free)**: `scripts/automode-check.sh` with a local mock provider and an **observer plugin** (`tests/observer-plugin/`): a second mod whose only hook is an `http.fetch` hook that appends one line per request it sees (URL, model, origin, body keys) to a file. Placed beneath the router in the hook chain (its `--plugin-dir` after the router's; Task 2), it records what actually left the router. Assertions are made on that record, not on `shadowLeaks` (which counts one guard's catches) and not on a debug-log string alone.
-- **live smoke tests**: `scripts/smoke.sh`, assertions updated in Task 10 to what the new design reports.
+- **live smoke tests**: `scripts/smoke.sh`, assertions updated in Task 11 to what the new design reports.
 - no UI e2e.
 
 ## Progress Tracking
@@ -105,7 +105,7 @@ http.fetch hook, every engine request (pending job or not), in this order
 - **Jobs have identity.** A late provider answer, a timer, or a cleanup of an abandoned dispatch acts only on the job whose id it holds, never on a newer job of the same loop.
 - **Errors stay text replies** prefixed `[provider-router]`, delivered as today: no SSE stop reason works (`end_turn` hides the text from a parent agent and costs three more calls, `refusal` and `model_context_window_exceeded` make the engine act on its own, an HTTP 400 cannot be recorded). The fetch-side handler answers the shadow request with the empty stub and the `turn.step` hook, which has yielded nothing yet, drains the stub's chunks and yields `errorChunks` (hook-made, `refusal`).
 - **Esc: answer the empty stub at once.** Both hooks' signals abort together and the engine still reads whatever the fetch hook returns; text handed then is recorded by the engine. The stub leaves nothing shown and nothing recorded, and the next request of the loop is a fresh `thread: create`.
-- **The router's timeout stays below the engine's.** The engine's request times out at 600 s (the fetch hook's signal aborts). `DEFAULT_TIMEOUT_MS` becomes 570 s. With `$.http.fetch` as the transport the host's 30 s limit decides first; the timer matters for a transport without that limit.
+- **The router's timeout stays below the engine's.** The engine's request times out at 600 s (the fetch hook's signal aborts). `DEFAULT_TIMEOUT_MS` becomes 570 s. With the `curl` transport (Task 7) the timer decides; on the `$.http.fetch` fallback the host's 30 s limit decides first.
 - **Rejected alternatives.** (1) A `tool.check` hook answering `allow`: runs a third-party model's calls unreviewed while the session says auto mode. (2) Passing the shadow's `engine` chunks around hook-made chunks: tested, no effect. (3) Document the limit only: lands in Task 1 as the interim state.
 
 ## Technical Details
@@ -171,7 +171,7 @@ An unparseable or unreadable body never matches. No loop condition. A match pass
 
 ### Timeout, Esc and abandonment inside the `http.fetch` hook
 - **Mechanism (a), proven in Task 2:** `raceCall` in the fetch-side handler, with the fetch hook's own `$.clock.sleep` and `next.signal`. A sleep racing an in-flight nested fetch is not cut at 10 s (15 s limit against a 25 s provider: timeout reply at 15005 ms, the next step works). (b) works too and is not used: one place owns the call, the timer and the signal.
-- `DEFAULT_TIMEOUT_MS` is 570 s, below the engine's 600 s. The host ends a `$.http.fetch` at 30 s whatever the timer says; that failure is an ordinary `failed` outcome with the host's text (`no complete answer within 30000ms`), which the error reply turns into a clear sentence.
+- `DEFAULT_TIMEOUT_MS` is 570 s, below the engine's 600 s. Provider calls use the `curl` transport (Task 7), which is not subject to the host's 30 s `$.http.fetch` limit. On the `$.http.fetch` fallback the host still ends a call at 30 s whatever the timer says; that failure is an ordinary `failed` outcome with the host's text (`no complete answer within 30000ms`), which the error reply turns into a clear sentence naming the fallback.
 - Esc: the handler's `next.signal` aborts (so does the step hook's), the in-flight fetch rejects with `The operation was aborted`, `raceCall` returns `cancelled`, the handler answers the stub at once.
 - Cases the handler and the hook must each handle, by job id: fetch-hook budget exhaustion; the `turn.step` dispatch abandoned while the fetch-side handler lingers; timeout followed by a new step on the same loop; a late provider success or rejection after abandonment (a rejection that nobody awaits is logged by the host: attach a handler). In every case the late result is discarded and the newer job is untouched.
 - A provider call already sent may still be billed.
@@ -204,7 +204,7 @@ An unparseable or unreadable body never matches. No loop condition. A match pass
 **Files:**
 - Create: `scripts/probes/mock-provider.py`, `scripts/probes/mock-gateway.py`, `scripts/probes/drive-pty.py`, `scripts/probes/make-probe.sh`, `scripts/probes/probe-mod/probe.ts`, `scripts/probes/run-probe.sh`, `scripts/probes/run-pty.sh`, `scripts/probes/make-abandoner.sh`, `scripts/probes/summary.sh`, `scripts/probes/check-predicate.py`, `scripts/probes/README.md` (how to run each probe and what result is expected; the probe mods themselves are generated into a temp dir, never committed as plugin code). These stay in the repo: they are how the engine facts are re-checked after a Claude Code release
 - Create: `tests/observer-plugin/.claude-plugin/plugin.json`, `tests/observer-plugin/hooks/hooks.json`, `tests/observer-plugin/hooks/register.ts`, `tests/observer-plugin/README.md`
-- Modify: `docs/design-notes.md` (findings), this plan (revise Tasks 3–11)
+- Modify: `docs/design-notes.md` (findings), this plan (revise Tasks 3–12)
 
 Each item is answered live and recorded as a row in `docs/design-notes.md` with the engine version, the sanitized request shape, the hook order and the outcome. A "no" on a **GO** item stops the plan for a decision by the user.
 
@@ -225,11 +225,10 @@ Each item is answered live and recorded as a row in `docs/design-notes.md` with 
 - [x] thread anchors: after an SSE answer with a minted id, the `previous_message_id` of the next continue — done: it equals the minted id; after a hook-made error step it is an engine-made `msg_hook_*` id
 - [x] classifier denial: a tool call the classifier blocks is not executed and the model gets the engine's own denial text — done: `curl ... | bash` against the mock was denied in stage 2 (`Reason: [Code from External]`), nothing ran
 - [x] non-auto modes: default and accept-edits behave as in `v0.1.2` (no classifier request; prompts and rules work) — done in `-p`: the same results as unpatched HEAD, no classifier request; interactive prompts not exercised
-- [x] write the findings into `docs/design-notes.md`; revise Technical Details and Tasks 3–11; send the revised plan for review; stop if any GO item failed (review sent by the orchestrator) — two GO items failed as planned (attribution, long hold): stopped for the user's decision
+- [x] write the findings into `docs/design-notes.md`; revise Technical Details and Tasks 3–12; send the revised plan for review; stop if any GO item failed (review sent by the orchestrator) — two GO items failed as planned (attribution, long hold): stopped for the user's decision
 
 ### Task 3: Reply → Anthropic SSE module
 
-⚠️ Blocked: Tasks 3 to 11 wait for the user's decision on the two failed GO items (Overview).
 
 **Files:**
 - Create: `hooks/sse.ts`, `hooks/sse.test.ts`
@@ -289,7 +288,24 @@ Built and tested on its own; nothing calls it from the hooks yet.
 - [ ] implement `answerShadow(job, body, io)` and the changes to `call.ts`
 - [ ] run tests, typecheck, validate - must pass before Task 7
 
-### Task 7: `routedStep` drives the engine's stream; delivery decision
+### Task 7: Provider transport through a `curl` child process
+
+**Files:**
+- Create: `hooks/transport.ts`, `hooks/transport.test.ts`
+- Modify: `hooks/answer.ts`, `hooks/answer.test.ts`, `hooks/register.ts`, `hooks/providers-command.ts`, `hooks/providers-command.test.ts`, `hooks/secrets.test.ts`, `scripts/probes/README.md`, `docs/design-notes.md`
+
+Why: the host ends any `$.http.fetch` at 30 s (Task 2), in `v0.1.2` too; a `curl` child held a provider call for 590 s in the spike. `curlFetch` has the adapters' `Fetch` signature, so the adapters do not change.
+
+- [ ] probe first, recorded as a row in `docs/design-notes.md` with a script in `scripts/probes/`: from the `http.fetch` hook, `$.process.spawn` running `curl` against `scripts/probes/slow.py` for 60 s and for 300 s completes; Esc (`next.signal`) kills the child (the slow server sees the connection drop); leaving the stream loop kills it; the hook's budget is not consumed while it waits. If `$.process.spawn` fails any of these, use `$.process.run` with `timeoutMs` and record that Esc then waits for the timeout (and log a `[deviation]`)
+- [ ] write tests for `curlFetch(url, init, run)` with an injected process runner: the argv is fixed (`curl`, `--config`, `-`) and holds no key, URL, header or body; the config written to stdin holds `url`, one `header` line per header, `data-binary` with the body, `silent`, `show-error`, `max-time` from the timeout, and a `write-out` that appends the HTTP status after a separator; the status and body are parsed back into `{ status, ok, text }`
+- [ ] write tests for quoting in the config: a body or header value with `"`, `\`, newlines, tabs and non-ASCII text round-trips (escape per curl's config syntax); a body of 5 MB is written whole
+- [ ] write tests for failures: `curl` exiting non-zero with a connection error gives a thrown error with curl's stderr text, redacted (`hooks/errors.ts` `redact`); a missing status separator gives an unreadable-reply error; stdout over the 4 MiB limit (`isStdoutTruncated`) gives a clear "reply too large" error
+- [ ] write tests for selection: `curlFetch` is used when `curl --version` runs (checked once per module load, cached); when it cannot be started the transport is `$.http.fetch` and `/providers` says `transport: fetch (30 s limit)`; with curl it says `transport: curl`
+- [ ] extend `hooks/secrets.test.ts`: no key appears in argv, in an error text, or in any `/providers` output, for every provider row
+- [ ] wire the handler's `io.fetch` in `register.ts` to the selected transport (the `http.fetch` hook passes `$.process.spawn` / `$.process.run` through a top-level function, as the hooks module checker requires)
+- [ ] run tests, typecheck, validate - must pass before Task 8
+
+### Task 8: `routedStep` drives the engine's stream; delivery decision
 
 **Files:**
 - Modify: `hooks/register.ts`, `hooks/register.test.ts`, `hooks/thread.test.ts`, `tests/harness.ts`
@@ -300,9 +316,9 @@ Built and tested on its own; nothing calls it from the hooks yet.
 - [ ] write tests for abandonment: the fetch-side handler lingering after the step's dispatch ended; a timeout followed at once by a new step on the loop; the dispatch's signal aborting while the generator stays suspended (no `.return()`): the job is removed by the listener, the next step on the loop can start, and the old continuation cannot touch the new job; listeners and timers are gone after a job settles
 - [ ] implement the new `routedStep` and wire the `http.fetch` hook to give the handler its own `$.http.fetch` / `$.clock.sleep`
 - [ ] keep the outer guarantees: the `turn.step` hook's try/catch and `.catch` still turn any failure into a local reply; a prefixed model never reaches the engine with its own id
-- [ ] run tests, typecheck, validate - must pass before Task 8
+- [ ] run tests, typecheck, validate - must pass before Task 9
 
-### Task 8: Remove what the new flow no longer uses
+### Task 9: Remove what the new flow no longer uses
 
 **Files:**
 - Modify: `hooks/shadow.ts`, `hooks/shadow.test.ts`, `hooks/chunks.ts`, `hooks/chunks.test.ts`, `hooks/errors.ts`, `hooks/errors.test.ts`
@@ -310,9 +326,9 @@ Built and tested on its own; nothing calls it from the hooks yet.
 - [ ] remove the `shadowStep` wrapper if nothing calls it; the empty stub stays (errors and Esc use it), also as the defensive answer for a job with no outcome
 - [ ] remove `toChunks` / `toResult` if nothing calls them; keep `errorChunks` (every error reply, and failures before `next`)
 - [ ] update or remove the tests of what was removed; add a test that the public surface each module still exports is used
-- [ ] run tests, typecheck, validate - must pass before Task 9
+- [ ] run tests, typecheck, validate - must pass before Task 10
 
-### Task 9: Usage, compaction and `/providers`
+### Task 10: Usage, compaction and `/providers`
 
 **Files:**
 - Modify: `hooks/register.ts`, `hooks/context.ts`, `hooks/context.test.ts`, `hooks/providers-command.ts`, `hooks/providers-command.test.ts`
@@ -321,9 +337,9 @@ Built and tested on its own; nothing calls it from the hooks yet.
 - [ ] write a test that the mod's own compaction scheduling is unchanged (Task 2: kept; with zero usage in the SSE the engine never starts its own)
 - [ ] write a test that `/providers` shows `autoModeClassifier`, a count of classifier requests passed and refused, and the existing counters
 - [ ] implement the usage hand-off, the compaction change and the `/providers` lines
-- [ ] run tests, typecheck, validate - must pass before Task 10
+- [ ] run tests, typecheck, validate - must pass before Task 11
 
-### Task 10: Local auto-mode check and smoke test update
+### Task 11: Local auto-mode check and smoke test update
 
 **Files:**
 - Create: `scripts/automode-check.sh`
@@ -335,26 +351,28 @@ Built and tested on its own; nothing calls it from the hooks yet.
 - [ ] same script, a call the classifier blocks (`curl <mock>/script.sh | bash`): the mock saw no GET and the model received the classifier's denial
 - [ ] same script, `autoModeClassifier: false`: the call is refused and the observer's record holds no classifier request
 - [ ] update `scripts/smoke.sh` to Task 2's findings: usage still lists only a zero-cost shadow entry; transcript rows of routed steps name the provider's model and a `msg_pr_*` id; an error case still shows the `[provider-router]` text; add `npm run automode`
-- [ ] run `scripts/automode-check.sh` - must pass before Task 11
+- [ ] run `scripts/automode-check.sh` - must pass before Task 12
 
-### Task 11: Verify acceptance criteria
+### Task 12: Verify acceptance criteria
 
 - [ ] auto mode, routed main session: `Agent` runs (automode check)
 - [ ] auto mode, subscription main session, routed subagent: its unsettled Bash call is judged, not refused for lack of a verdict
 - [ ] a blocked call does not execute
+- [ ] a routed reply that takes 60 s (the mock with a delay) is delivered through the `curl` transport; with `curl` made unavailable (a `PATH` without it) the same step fails with the 30 s fallback message
+- [ ] the observer cannot see `curl` traffic (it is a child process, not `$.http.fetch`): the mock provider's own log is the record of provider calls, and no request reached it that names the shadow model
 - [ ] default and accept-edits modes behave as in `v0.1.2`
 - [ ] by the observer's record: no shadow request, no routed conversation and no prefixed model id reached the first-party host in any run (an interactive run included: it sends the prompt-suggestion request)
 - [ ] no secret in any output (`hooks/secrets.test.ts` passes)
 - [ ] run `npm test`, `npm run typecheck`, `npm run validate` - all pass
 - [ ] run `code-reviewer` on the branch, fix findings with `review-fixer`, re-review (max 3 rounds)
 
-### Task 12: Documentation
+### Task 13: Documentation
 
 **Files:**
 - Modify: `README.md`, `CLAUDE.md`, `docs/design-notes.md`
 
 - [ ] README "How it works": the new flow diagram
-- [ ] README Limits: replace the auto-mode limitation with what now holds: auto mode works; the classifier runs on the subscription and sees the session's prompts and tool calls; the session classifies locally from the first routed step on, subscription loops included; the `autoModeClassifier` opt-out applies to the whole session, and right after a reload with it set a classifier request can be refused once; not behind `ANTHROPIC_BASE_URL`; a provider reply must arrive within 30 s (the host's limit on `$.http.fetch`, in `v0.1.2` too); routed replies are still not streamed
+- [ ] README Limits: replace the auto-mode limitation with what now holds: auto mode works; the classifier runs on the subscription and sees the session's prompts and tool calls; the session classifies locally from the first routed step on, subscription loops included; the `autoModeClassifier` opt-out applies to the whole session, and right after a reload with it set a classifier request can be refused once; not behind `ANTHROPIC_BASE_URL`; provider calls go through `curl` (a reply may take up to 570 s); without `curl` the plugin falls back to `$.http.fetch`, where a reply must arrive within 30 s (the host's limit, which `v0.1.2` also has); routed replies are still not streamed
 - [ ] README: correct "Your subscription is never routed and never pays for a routed call" to state the classifier exception exactly
 - [ ] README Troubleshooting: the no-verdict row now points at `autoModeClassifier: false` or an old plugin version
 - [ ] `CLAUDE.md`: the fail-closed list gains the outbound guard, the prefixed-id rule, the classifier predicate with its stated residual, and the strict `.catch`; the thread-invariant wording follows the delivery table
