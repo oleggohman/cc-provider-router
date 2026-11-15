@@ -58,14 +58,3 @@ export function* toChunks(r: Reply): Generator<any, void, unknown> {
   }
   yield { kind: 'stop', stopReason: r.stopReason, usage: turnUsage(r) }
 }
-
-export function toResult(e: { turnId: string; index: number }, r: Reply) {
-  return {
-    turnId: e.turnId,
-    index: e.index,
-    answer: r.content.map(b => (b.type === 'text' ? b.text : '')).join(''),
-    toolUses: r.content.flatMap(b => (b.type === 'tool_use' ? [{ name: b.name, input: b.input ?? {} }] : [])),
-    stopReason: r.stopReason,
-    usage: turnUsage(r),
-  }
-}

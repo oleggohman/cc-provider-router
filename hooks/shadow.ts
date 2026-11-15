@@ -431,25 +431,3 @@ export function closeShadow(key: string, opened: OpenedShadow, end: { aborted: b
   if (blind) breaker.blind = true
   return new ShadowError(`the engine request was not captured${end.failure ? `: ${String(end.failure)}` : ''}${blind ? `; ${BLIND}` : ''}`)
 }
-
-// Runs the shadow step for `e` and returns the engine's captured request.
-// Throws ShadowError when no request was captured, the loop already has a
-// pending shadow, or the breaker is set (then `next` is never called). An
-// uncaptured step that ends without Esc (`signal`) while the hook saw no
-// engine request sets the breaker; an engine request seen later clears it.
-// The stub's chunks are drained here and
-// never yielded.
-export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>, signal?: AbortSignal): Promise<any> {
-  const key = loopKeyOf(e.agentId)
-  const opened = openShadow(key, { messageCount: e.messageCount })
-  let failure: unknown
-  try {
-    for await (const _ of next({ ...e, model: SHADOW_MODEL })) void _
-  } catch (err) {
-    failure = err
-  }
-  // Only once the shadow's stream has ended (success, error or abort).
-  const uncaptured = closeShadow(key, opened, { aborted: !!signal?.aborted, failure })
-  if (uncaptured) throw uncaptured
-  return opened.job.body
-}

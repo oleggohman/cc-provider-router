@@ -118,7 +118,7 @@ header for the rest. It passes plugin options via `--settings` with
   `tool.list`, `clock.sleep`, `session.messages`) answer `{ value }`.
 - The kit refuses `$.http.fetch` from a test's own hooks, and the kit's mod
   instance is separate from the test's imports. Inject `fetch` / `sleep` /
-  `signal` (`StepIO`) and test `routedStep`, `shadowFetch`, `shadowStep` and
+  `signal` (`StepIO`) and test `routedStep`, `shadowFetch` and
   the adapters directly; plugin-level tests cover key loading, the shadow
   model and zero network.
 - The kit's `$` has no `env` noun: `loadConfig` tests pass a fake `$`.

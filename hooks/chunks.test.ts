@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { type Reply, normalizeStop, toChunks, toResult } from './chunks.ts'
+import * as chunks from './chunks.ts'
+import { type Reply, normalizeStop, toChunks } from './chunks.ts'
 
 const USAGE = { input_tokens: 120, output_tokens: 30, cache_read_input_tokens: 5, cache_creation_input_tokens: 2 }
-const E = { turnId: 't9', index: 3 }
 
 function reply(over: Partial<Reply> = {}): Reply {
   return { model: 'gpt-5', content: [], stopReason: 'end_turn', usage: USAGE, ...over }
@@ -78,33 +78,11 @@ describe('normalizeStop', () => {
   })
 })
 
-describe('toResult', () => {
-  test('answer joins the text, toolUses list name and input, usage carries the model', () => {
-    const r = toResult(
-      E,
-      reply({
-        stopReason: 'tool_use',
-        content: [
-          { type: 'text', text: 'a' },
-          { type: 'tool_use', id: 'x', name: 'Read', input: { file_path: '/y' } },
-          { type: 'text', text: 'b' },
-        ],
-      }),
-    )
-    expect(r).toEqual({
-      turnId: 't9',
-      index: 3,
-      answer: 'ab',
-      toolUses: [{ name: 'Read', input: { file_path: '/y' } }],
-      stopReason: 'tool_use',
-      usage: { ...USAGE, model: 'gpt-5' },
-    })
-  })
-
-  test('empty reply: empty answer, no tool uses', () => {
-    const r = toResult(E, reply())
-    expect(r.answer).toBe('')
-    expect(r.toolUses).toEqual([])
-    expect(r.stopReason).toBe('end_turn')
+// The module's runtime exports, pinned: a new export is a deliberate edit here.
+// Each has a caller: normalizeStop in translate.ts, num and ZERO_USAGE in the
+// hooks, toChunks in the spike probe that scripts/probes/make-probe.sh builds.
+describe('module surface', () => {
+  test('exports: ZERO_USAGE, num, normalizeStop, toChunks', () => {
+    expect(Object.keys(chunks).sort()).toEqual(['ZERO_USAGE', 'normalizeStop', 'num', 'toChunks'])
   })
 })

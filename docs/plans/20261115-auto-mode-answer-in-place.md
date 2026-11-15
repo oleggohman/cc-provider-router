@@ -328,10 +328,11 @@ Why: the host ends any `$.http.fetch` at 30 s (Task 2), in `v0.1.2` too; a `curl
 **Files:**
 - Modify: `hooks/shadow.ts`, `hooks/shadow.test.ts`, `hooks/chunks.ts`, `hooks/chunks.test.ts`, `hooks/errors.ts`, `hooks/errors.test.ts`
 
-- [ ] remove the `shadowStep` wrapper if nothing calls it; the empty stub stays (errors and Esc use it), also as the defensive answer for a job with no outcome
-- [ ] remove `toChunks` / `toResult` if nothing calls them; keep `errorChunks` (every error reply, and failures before `next`)
-- [ ] update or remove the tests of what was removed; add a test that the public surface each module still exports is used
-- [ ] run tests, typecheck, validate - must pass before Task 10
+- [x] remove the `shadowStep` wrapper if nothing calls it; the empty stub stays (errors and Esc use it), also as the defensive answer for a job with no outcome
+- [x] remove `toChunks` / `toResult` if nothing calls them; keep `errorChunks` (every error reply, and failures before `next`)
+- [x] update or remove the tests of what was removed; add a test that the public surface each module still exports is used
+- ➕ As built: `shadowStep` removed (its tests drive the open/close pair through a test-local helper); `toResult` removed with its tests; `toChunks` kept because `scripts/probes/probe-mod/probe.ts` (built by `make-probe.sh`) imports it; `sessionFlags` kept as the test observer of the opt-out flags; each of `shadow.ts`, `chunks.ts`, `errors.ts` pins its runtime exports in its test
+- [x] run tests, typecheck, validate - must pass before Task 10
 
 ### Task 10: Usage, compaction and `/providers`
 

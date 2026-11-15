@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
 import { ID_FORMS, classifyModel } from './route.ts'
-import { SHADOW_MODEL, ShadowError, beginShadow, closeShadow, endShadow, isEngineRequest, latestJob, noteStep, openShadow, resetShadow, sessionFlags, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
+import * as shadow from './shadow.ts'
+import { SHADOW_MODEL, ShadowError, type ShadowStepEvent, beginShadow, closeShadow, endShadow, isEngineRequest, latestJob, loopKeyOf, noteStep, openShadow, resetShadow, sessionFlags, shadowFetch, shadowFetchFailed, shadowStats } from './shadow.ts'
 import { cfg, drain, sleeper, tick, ZERO } from '../tests/harness.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the engine
@@ -14,6 +15,24 @@ const URL = 'https://api.anthropic.com/v1/messages?beta=true'
 // The shipped default of the autoModeClassifier option, and the opt-out.
 const ON = { autoModeClassifier: true }
 const OFF = { autoModeClassifier: false }
+
+// The turn.step side of a shadow step, as routedStep drives it: open the loop's
+// job, drain the engine's stream (the stub is never yielded), close the job.
+// The shadowStep wrapper of shadow.ts was removed in Task 9; these tests keep
+// its meaning through the open/close pair that replaced it.
+async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>, signal?: AbortSignal): Promise<any> {
+  const key = loopKeyOf(e.agentId)
+  const opened = openShadow(key, { messageCount: e.messageCount })
+  let failure: unknown
+  try {
+    for await (const _ of next({ ...e, model: SHADOW_MODEL })) void _
+  } catch (err) {
+    failure = err
+  }
+  const uncaptured = closeShadow(key, opened, { aborted: !!signal?.aborted, failure })
+  if (uncaptured) throw uncaptured
+  return opened.job.body
+}
 
 // `origin`: who raised the request (`next.origin.plugin`, set by the host);
 // "engine" by default for a request with engine markers, this mod otherwise.
@@ -1523,5 +1542,12 @@ describe('the router-prefix check agrees with route.ts', () => {
       expect(refused(await withJobs(['main'], () => fetchVia(net, classifier({ ...STAGE1, model: p }))))).toBe(true)
     }
     expect(net.calls.length).toBe(0)
+  })
+})
+
+// The module's runtime exports, pinned: a new export is a deliberate edit here.
+describe('module surface', () => {
+  test('exports are pinned', () => {
+    expect(Object.keys(shadow).sort()).toEqual(['SHADOW_MODEL', 'ShadowError', 'beginShadow', 'closeShadow', 'endShadow', 'isClassifierRequest', 'isEngineRequest', 'latestJob', 'loopKeyOf', 'noteStep', 'openShadow', 'resetShadow', 'sessionFlags', 'shadowFetch', 'shadowFetchFailed', 'shadowStats'])
   })
 })

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
+import * as errors from './errors.ts'
 import { errorChunks, localError, providerError, sanitize } from './errors.ts'
 import { sleeper } from '../tests/harness.ts'
 
@@ -90,5 +91,12 @@ describe('errorChunks', () => {
     expect(chunks[0].text.startsWith('[provider-router]')).toBe(true)
     expect(s.value.answer).toContain('shadow request failed')
     expect(s.value.answer).toContain('engine unavailable')
+  })
+})
+
+// The module's runtime exports, pinned: a new export is a deliberate edit here.
+describe('module surface', () => {
+  test('exports are pinned', () => {
+    expect(Object.keys(errors).sort()).toEqual(['PREFIX', 'errorChunks', 'localError', 'providerError', 'redact', 'sanitize'])
   })
 })
