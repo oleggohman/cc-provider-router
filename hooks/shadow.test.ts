@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
-import { SHADOW_MODEL, ShadowError, resetShadow, shadowFetch, shadowStats, shadowStep } from './shadow.ts'
+import { SHADOW_MODEL, ShadowError, isEngineRequest, resetShadow, shadowFetch, shadowFetchFailed, shadowStats, shadowStep } from './shadow.ts'
 
 // The test kit refuses `$.http.fetch` from a test's own hooks, so the engine
 // stand-in sends its requests straight through the mod's `http.fetch` logic
@@ -84,7 +84,15 @@ const step = (over: any = {}) => ({ turnId: 't1', index: 0, model: 'openai:gpt-5
 const ROUTE = { provider: 'openai', model: 'gpt-5' } as const
 const CFG = { keys: { openai: 'sk-test-secret-123456' }, custom: new Map(), contextWindows: new Map(), warnings: [] }
 
-const run = (e: any, eng: { next: any }) => drain(routedStep(e, eng.next, ROUTE, CFG as any))
+// The provider beneath a captured step: answers 500 (the dispatch itself is
+// tested in the adapter tests). Never the network beneath shadowFetch.
+const io = (signal = new AbortController().signal) => ({
+  fetch: async () => ({ status: 500, ok: false, text: '{"error":{"message":"test provider"}}' }),
+  sleep: (_ms: number, o?: { signal?: AbortSignal }) => new Promise<void>((_r, rej) => o?.signal?.addEventListener('abort', () => rej(new Error('aborted')))),
+  signal,
+})
+
+const run = (e: any, eng: { next: any }, threads: Map<string, any> = new Map(), signal?: AbortSignal) => drain(routedStep(e, eng.next, ROUTE, CFG as any, io(signal), threads))
 
 describe('routed step with the shadow capture', () => {
   test('a match is answered with the zero-usage stub, never the network', async () => {
@@ -230,16 +238,34 @@ describe('routed step with the shadow capture', () => {
     expect(result.answer).not.toContain('not captured')
   })
 
-  test('pending cleared after an abort before any request', async () => {
+  test('pending cleared after an engine failure before any request (no Esc): error text', async () => {
     resetShadow()
     const net = network()
     const next = async function* (): AsyncGenerator<any, any> {
-      throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+      throw new Error('engine broke')
     }
     const { result } = await run(step(), { next })
     expect(net.calls.length).toBe(0)
     expect(shadowStats().pending).toBe(0)
     expect(result.answer).toContain('not captured')
+  })
+
+  test('Esc during the shadow step ends the step cleanly: no chunks, no text, no thread state', async () => {
+    resetShadow()
+    const net = network()
+    const esc = new AbortController()
+    const next = async function* (): AsyncGenerator<any, any> {
+      esc.abort()
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+    }
+    const threads = new Map<string, any>()
+    const { chunks, result } = await run(step(), { next }, threads, esc.signal)
+    expect(net.calls.length).toBe(0)
+    expect(shadowStats().pending).toBe(0)
+    expect(chunks).toEqual([])
+    expect(result.answer).toBe('')
+    expect(result.stopReason).toBe(null)
+    expect(threads.size).toBe(0)
   })
 
   test('the stub never reaches the caller, usage is zero and shadowLeaks stays 0', async () => {
@@ -278,6 +304,109 @@ describe('shadow fetch rules', () => {
     expect(shadowStats().shadowLeaks).toBe(1)
   })
 
+  test('an unreadable engine body for another loop is refused while any shadow is pending', async () => {
+    resetShadow()
+    const net = network()
+    let open!: () => void
+    const gate = new Promise<void>(r => (open = r))
+    const running = shadowStep(step({ agentId: 'a1' }), engine(net, { gate }).next)
+    await tick()
+    expect((await send(net, { agent: 'other', body: { base64: 'AAAA' } })).status).toBe(400)
+    open()
+    await running
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('an unreadable engine body with nothing pending passes (not a shadow)', async () => {
+    resetShadow()
+    const net = network()
+    expect((await send(net, { body: { base64: 'AAAA' } })).text).toBe('{"network":true}')
+    expect(net.calls.length).toBe(1)
+  })
+
+  test('an engine request whose string body is not JSON but names the shadow model is refused', async () => {
+    resetShadow()
+    const net = network()
+    expect((await send(net, { body: `{"model":"${SHADOW_MODEL}", broken` })).status).toBe(400)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('an engine request whose URL names the shadow model is refused (model in the path)', async () => {
+    resetShadow()
+    const net = network()
+    const ev = fetchEvent({ model: 'claude-haiku-4-5' })
+    ev.url = `https://bedrock.example/model/${SHADOW_MODEL}/invoke`
+    const out: any = await shadowFetch(ev, net.next)
+    expect(out.value.status).toBe(400)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('engine markers: compress alone, the session header alone, any header case', () => {
+    expect(isEngineRequest({ url: URL, init: { compress: 'gzip' } })).toBe(true)
+    expect(isEngineRequest({ url: URL, init: { headers: { 'x-claude-code-session-id': 's' } } })).toBe(true)
+    expect(isEngineRequest({ url: URL, init: { headers: { 'X-Claude-Code-Session-Id': 's' } } })).toBe(true)
+    expect(isEngineRequest({ url: URL, init: { headers: { 'content-type': 'application/json' } } })).toBe(false)
+  })
+
+  test('the agent header is read in any case for the loop key', async () => {
+    resetShadow()
+    const net = network()
+    // A mixed-case agent header matches the pending entry of that loop.
+    let open!: () => void
+    const gate = new Promise<void>(r => (open = r))
+    const captured = shadowStep(step({ agentId: 'a1' }), async function* (e: any) {
+      const ev = fetchEvent({ messages: e.messageCount })
+      ev.init.headers['X-Claude-Code-Agent-Id'] = 'a1'
+      const out: any = await shadowFetch(ev, net.next)
+      expect(out.value.status).toBe(200)
+      await gate
+    })
+    open()
+    expect((await captured).model).toBe(SHADOW_MODEL)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('message count edges: no messages is refused; messageCount 0 still allows one', async () => {
+    resetShadow()
+    const net = network()
+    const empty = engine(net, { reqs: () => [{ messages: 0 }] })
+    expect((await run(step({ messageCount: 1 }), empty)).result.answer).toContain('not captured')
+    expect(empty.answers[0].status).toBe(400)
+    const zero = engine(net, { reqs: () => [{ messages: 1 }] })
+    await run(step({ messageCount: 0 }), zero)
+    expect(zero.answers[0].status).toBe(200)
+    expect(net.calls.length).toBe(0)
+  })
+
+  test("the mod's own fetch passes even when its conversation quotes the shadow model name", async () => {
+    resetShadow()
+    const net = network()
+    const body = JSON.stringify({ model: 'glm-5.3', messages: [{ role: 'user', content: `grep ${SHADOW_MODEL} README.md` }] })
+    const out: any = await shadowFetch({ url: 'https://api.z.ai/api/anthropic/v1/messages', init: { method: 'POST', headers: {}, body } }, net.next)
+    expect(out.value.text).toBe('{"network":true}')
+    expect(net.calls.length).toBe(1)
+    expect(shadowStats().shadowLeaks).toBe(0)
+  })
+
+  test('a non-engine request: JSON naming the shadow model, unparseable text naming it, or unreadable bytes while pending, is refused', async () => {
+    resetShadow()
+    const net = network()
+    const plain = (body: unknown) => shadowFetch({ url: 'https://x.example/v1', init: { method: 'POST', headers: {}, body } }, net.next) as any
+    expect((await plain(JSON.stringify({ model: SHADOW_MODEL, messages: [] }))).value.status).toBe(400)
+    expect((await plain(`model=${SHADOW_MODEL}&x`)).value.status).toBe(400)
+    expect(shadowStats().shadowLeaks).toBe(2)
+    let open!: () => void
+    const gate = new Promise<void>(r => (open = r))
+    const running = shadowStep(step({ agentId: 'a1' }), engine(net, { gate }).next)
+    await tick()
+    expect((await plain({ bytes: 'AAAA' })).value.status).toBe(400)
+    open()
+    await running
+    // With nothing pending, unreadable bytes are not a shadow.
+    expect((await plain({ bytes: 'AAAA' })).value.text).toBe('{"network":true}')
+    expect(net.calls.length).toBe(1)
+  })
+
   test("the mod's own fetches pass through", async () => {
     resetShadow()
     const net = network()
@@ -301,6 +430,42 @@ describe('shadow fetch rules', () => {
     await running
     expect(net.calls.length).toBe(1)
     expect(net.calls[0].init.body).not.toContain(SHADOW_MODEL)
+  })
+})
+
+describe('http.fetch .catch (shadowFetch failed before deciding)', () => {
+  const caught = (net: ReturnType<typeof network>, called: boolean) => Object.assign((e: any) => net.next(e), { called })
+
+  test('already passed on by the hook: replayed, nothing new decided', async () => {
+    resetShadow()
+    const net = network()
+    const out: any = await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5' }), caught(net, true))
+    expect(out.value.text).toBe('{"network":true}')
+  })
+
+  test('anything that could be a shadow is refused: a pending loop, the shadow model in body or URL', async () => {
+    resetShadow()
+    const net = network()
+    expect(((await shadowFetchFailed(fetchEvent({}), caught(net, false))) as any).value.status).toBe(400)
+    const ev = fetchEvent({ model: 'claude-haiku-4-5' })
+    ev.url = `https://x.example/${SHADOW_MODEL}`
+    expect(((await shadowFetchFailed(ev, caught(net, false))) as any).value.status).toBe(400)
+    let open!: () => void
+    const gate = new Promise<void>(r => (open = r))
+    const running = shadowStep(step({ agentId: 'a1' }), engine(net, { gate }).next)
+    await tick()
+    expect(((await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5', agent: 'zz' }), caught(net, false))) as any).value.status).toBe(400)
+    open()
+    await running
+    expect(net.calls.length).toBe(0)
+  })
+
+  test('an ordinary request with nothing pending goes on', async () => {
+    resetShadow()
+    const net = network()
+    const out: any = await shadowFetchFailed(fetchEvent({ model: 'claude-haiku-4-5' }), caught(net, false))
+    expect(out.value.text).toBe('{"network":true}')
+    expect(net.calls.length).toBe(1)
   })
 })
 
@@ -383,6 +548,6 @@ describe('through the plugin', () => {
     expect(seen[0].model).toBe(SHADOW_MODEL)
     expect(net.length).toBe(0)
     expect(JSON.stringify(chunks)).not.toContain('ENGINE-STUB-CHUNK')
-    expect(result.answer).toContain('[provider-router] openai')
+    expect(result.answer).toContain('[provider-router] openai error: shadow request failed')
   })
 })

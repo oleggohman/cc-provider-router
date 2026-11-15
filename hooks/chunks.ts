@@ -20,8 +20,10 @@ const STOPS = new Set<string>(['end_turn', 'max_tokens', 'stop_sequence', 'tool_
 
 // A provider's stop reason as one the engine knows. A reply that calls tools
 // and says it just ended (or says nothing) stops with `tool_use`, so the
-// engine runs the tools.
+// engine runs the tools; one that says `tool_use` but has no tool call left
+// (none survived parsing) ends the turn.
 export function normalizeStop(raw: unknown, callsTools: boolean): StopReason {
+  if (raw === 'tool_use' && !callsTools) return 'end_turn'
   if (typeof raw === 'string' && STOPS.has(raw) && !(callsTools && raw === 'end_turn')) return raw as StopReason
   return callsTools ? 'tool_use' : 'end_turn'
 }

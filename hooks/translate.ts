@@ -25,6 +25,7 @@ export type ChatRequest = {
 export type ChatOptions = { reasoning: boolean; effort?: string | number }
 
 const IMAGE_MOVED = '(image attached in the next message)'
+const DOCUMENT_MOVED = '(document attached in the next message)'
 
 function textOf(v: unknown): string {
   if (typeof v === 'string') return v
@@ -78,21 +79,21 @@ function userMessages(m: any): ChatMessage[] {
   for (const b of m.content) {
     if (b?.type === 'tool_result') {
       const blocks = typeof b.content === 'string' ? [{ type: 'text', text: b.content }] : Array.isArray(b.content) ? b.content : []
+      // Tool messages carry text only: images and documents (a Read of a PDF)
+      // move to the user message after them, with a note in the tool content.
       const texts: string[] = []
-      let images = 0
+      const notes = new Set<string>()
       for (const c of blocks) {
-        if (c?.type === 'image') {
-          const p = imagePart(c)
+        if (c?.type === 'image' || c?.type === 'document') {
+          const p = c.type === 'image' ? imagePart(c) : documentPart(c)
           if (p) {
             moved.push(p)
-            images++
+            notes.add(c.type === 'image' ? IMAGE_MOVED : DOCUMENT_MOVED)
           }
         } else if (typeof c?.text === 'string') texts.push(c.text)
       }
-      let content = texts.join('\n')
-      if (images) content = content ? `${content}\n${IMAGE_MOVED}` : IMAGE_MOVED
-      if (b.is_error) content = `Error: ${content}`
-      out.push({ role: 'tool', tool_call_id: String(b.tool_use_id ?? ''), content })
+      const content = [...texts, ...notes].join('\n')
+      out.push({ role: 'tool', tool_call_id: String(b.tool_use_id ?? ''), content: b.is_error ? `Error: ${content}` : content })
     } else {
       const p = userPart(b)
       if (p) parts.push(p)

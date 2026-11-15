@@ -24,7 +24,7 @@ describe('Anthropic -> Chat Completions', () => {
   })
 
   test('user text blocks become text parts; cache_control dropped', async () => {
-    const c = toChat(buildRequest(fx.textOnly, OPENAI, {}).request, { reasoning: false })
+    const c = toChat(buildRequest(fx.textOnly, OPENAI.model, 8192), { reasoning: false })
     expect(c.messages[1]).toEqual({
       role: 'user',
       content: [
@@ -35,7 +35,7 @@ describe('Anthropic -> Chat Completions', () => {
   })
 
   test('images: base64 -> data URL, url source -> url', async () => {
-    const c = toChat(buildRequest(fx.images, OPENAI, {}).request, { reasoning: false })
+    const c = toChat(buildRequest(fx.images, OPENAI.model, 8192), { reasoning: false })
     expect(c.messages[1]!.content).toEqual([
       { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
       { type: 'text', text: 'what is this?' },
@@ -45,7 +45,7 @@ describe('Anthropic -> Chat Completions', () => {
   })
 
   test('documents: text source as text; base64 PDF as a file part; content source as text', async () => {
-    const c = toChat(buildRequest(fx.documents, OPENAI, {}).request, { reasoning: false })
+    const c = toChat(buildRequest(fx.documents, OPENAI.model, 8192), { reasoning: false })
     expect(c.messages[1]!.content).toEqual([
       { type: 'text', text: 'doc body' },
       { type: 'text', text: 'summarise' },
@@ -71,7 +71,7 @@ describe('Anthropic -> Chat Completions', () => {
   })
 
   test('assistant tool_use -> tool_calls; tool_result -> role tool message with tool_call_id', async () => {
-    const c = toChat(buildRequest(fx.toolRoundTrip, OPENAI, {}).request, { reasoning: false })
+    const c = toChat(buildRequest(fx.toolRoundTrip, OPENAI.model, 8192), { reasoning: false })
     expect(c.messages.slice(1)).toEqual([
       { role: 'user', content: 'list files' },
       { role: 'assistant', content: null, tool_calls: [{ id: 'toolu_1', type: 'function', function: { name: 'Bash', arguments: '{"command":"ls"}' } }] },
@@ -133,13 +133,31 @@ describe('Anthropic -> Chat Completions', () => {
     ])
   })
 
+  test('documents inside a tool result (Read of a PDF) move into a following user message', async () => {
+    const c = toChat(
+      base({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'document', title: 'spec.pdf', source: { type: 'base64', media_type: 'application/pdf', data: 'PDF' } }] }],
+          },
+        ],
+      }),
+      { reasoning: false },
+    )
+    expect(c.messages).toEqual([
+      { role: 'tool', tool_call_id: 't1', content: '(document attached in the next message)' },
+      { role: 'user', content: [{ type: 'file', file: { filename: 'spec.pdf', file_data: 'data:application/pdf;base64,PDF' } }] },
+    ])
+  })
+
   test('empty tool result content still gives a tool message', async () => {
     const c = toChat(base({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1' }] }] }), { reasoning: false })
     expect(c.messages).toEqual([{ role: 'tool', tool_call_id: 't1', content: '' }])
   })
 
   test('thinking blocks in history are dropped; an assistant turn with only thinking is dropped', async () => {
-    const c = toChat(buildRequest(fx.thinkingBlocks, OPENAI, {}).request, { reasoning: false })
+    const c = toChat(buildRequest(fx.thinkingBlocks, OPENAI.model, 8192), { reasoning: false })
     expect(c.messages.slice(1)).toEqual([
       { role: 'user', content: 'q' },
       { role: 'assistant', content: 'a' },
@@ -151,7 +169,7 @@ describe('Anthropic -> Chat Completions', () => {
 
   test('tools -> function tools; tools without input_schema (server tools) dropped', async () => {
     const c = toChat(
-      buildRequest({ ...fx.textOnly, tools: [...fx.textOnly.tools, { type: 'web_search_20250305', name: 'web_search' }, { name: 'NoDesc', input_schema: { type: 'object' } }] }, OPENAI, {}).request,
+      buildRequest({ ...fx.textOnly, tools: [...fx.textOnly.tools, { type: 'web_search_20250305', name: 'web_search' }, { name: 'NoDesc', input_schema: { type: 'object' } }] }, OPENAI.model, 8192),
       { reasoning: false },
     )
     expect(c.tools).toEqual([
@@ -163,7 +181,7 @@ describe('Anthropic -> Chat Completions', () => {
 
   test('no tools -> no tools field; deferred tools come flattened from buildRequest', async () => {
     expect('tools' in toChat(base(), { reasoning: false })).toBe(false)
-    const c = toChat(buildRequest(fx.deferredTools, OPENAI, {}).request, { reasoning: false })
+    const c = toChat(buildRequest(fx.deferredTools, OPENAI.model, 8192), { reasoning: false })
     expect(c.tools!.map((t: any) => t.function.name)).toEqual(['Bash', 'Read', 'ToolSearch', 'WebFetch'])
     expect(c.messages.at(-1)).toEqual({ role: 'tool', tool_call_id: 'toolu_s', content: 'Tool loaded: WebFetch' })
   })
@@ -262,6 +280,14 @@ describe('Chat Completions -> reply', () => {
     const r = fromChat(withFinish({ tool_calls: [{ type: 'function', function: { name: 'Bash', arguments: '{}' } }] }, 'tool_calls'), 'gpt-5')!
     const b = r.content[0]!
     expect(b.type === 'tool_use' && typeof b.id === 'string' && b.id.length > 0).toBe(true)
+  })
+
+  test('two id-less tool calls in one reply get different ids', async () => {
+    const call = { type: 'function', function: { name: 'Bash', arguments: '{}' } }
+    const r = fromChat(withFinish({ tool_calls: [call, call] }, 'tool_calls'), 'gpt-5')!
+    const ids = r.content.map(b => (b.type === 'tool_use' ? b.id : ''))
+    expect(ids.length).toBe(2)
+    expect(ids[0]).not.toBe(ids[1])
   })
 
   test('finish_reason mapping', async () => {

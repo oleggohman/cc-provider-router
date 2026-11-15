@@ -6,7 +6,7 @@
   "license": "MIT",
   "scripts": {
     "test": "claude plugin test .",
-    "typecheck": "tsc -p .",
+    "typecheck": "npm_config_cache=\"$TMPDIR/npm-cache\" npx -y -p typescript@5.6.3 tsc -p .",
     "validate": "claude plugin validate ."
   }
 }

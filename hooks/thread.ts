@@ -15,22 +15,19 @@ const PLACEHOLDER_TOOL = 'DeferredToolPlaceholder'
 
 // A loop's conversation as the provider last saw it: the system prompt and
 // tools in force, and the messages up to and including the last assistant
-// turn the engine recorded (the anchor a continue builds on).
-export type ThreadState = { system: unknown; tools: any[] | undefined; base: any[] }
+// turn the engine recorded (the anchor a continue builds on). `base` is
+// undefined once dropped (a step failed before its request was captured, or
+// a subagent's turn ended): system and tools stay, so the conversation can be
+// rebuilt from the session's history (see resolveThread).
+export type ThreadState = { system: unknown; tools: any[] | undefined; base: any[] | undefined }
 
-export type Threads = {
-  get(key: string): ThreadState | undefined
-  set(key: string, s: ThreadState): void
-  delete(key: string): void
-}
+// Thread state per loop key (`loopKeyOf` in shadow.ts).
+export type Threads = Map<string, ThreadState>
 
-export function createThreads(): Threads {
-  const m = new Map<string, ThreadState>()
-  return { get: k => m.get(k), set: (k, s) => void m.set(k, s), delete: k => void m.delete(k) }
-}
-
-export function loopKeyOf(agentId: string | undefined): string {
-  return agentId || 'main'
+// Forgets a loop's conversation, keeping its system prompt and tools.
+export function dropBase(threads: Threads, key: string): void {
+  const s = threads.get(key)
+  if (s) threads.set(key, { ...s, base: undefined })
 }
 
 function isBilling(b: any): boolean {
@@ -48,29 +45,41 @@ function systemIsEmpty(system: unknown): boolean {
   return s === undefined || s === '' || (Array.isArray(s) && s.length === 0)
 }
 
+// Tools other than the placeholder: a continue with none keeps the stored set.
+function hasRealTools(tools: unknown): tools is any[] {
+  return Array.isArray(tools) && tools.some(t => t?.name !== PLACEHOLDER_TOOL)
+}
+
+// The history's messages up to and including its last assistant turn.
+function upToLastAssistant(history: any[]): any[] {
+  for (let i = history.length - 1; i >= 0; i--) if (history[i]?.role === 'assistant') return history.slice(0, i + 1)
+  return []
+}
+
 export type Resolved = { ok: true; body: any } | { ok: false; message: string }
 
+// What a continue without a known conversation can be rebuilt from: the
+// session's Messages API history of the loop, and a state to take the system
+// prompt and tools from when the loop has none (an engine fork of the main
+// loop).
+export type Recovery = { history?: any[]; fallback?: ThreadState }
+
+const LOST =
+  'the conversation so far is not known to the router (it continues a thread started before this session of the mod, e.g. after a /config change, a model switch or an interrupted step); run /clear or /compact and try again'
+
 // The full request for this step: a create (or a body without `thread`) as
-// is; a continue rebuilt from the loop's state plus the new messages.
-export function resolveThread(body: any, state: ThreadState | undefined): Resolved {
+// is; a continue rebuilt from the loop's state plus the new messages, or,
+// when the state holds no conversation, from the session history.
+export function resolveThread(body: any, state: ThreadState | undefined, recovery: Recovery = {}): Resolved {
   if (body?.thread?.type !== 'continue') return { ok: true, body }
-  if (!state) {
-    return {
-      ok: false,
-      message:
-        'the conversation so far is not known to the router (it continues a thread started before this session of the mod, e.g. after a /config change or an interrupted step); run /clear or /compact and try again',
-    }
-  }
+  const known = state ?? recovery.fallback
+  const system = systemIsEmpty(body.system) ? known?.system : body.system
+  const tools = hasRealTools(body.tools) ? body.tools : (known?.tools ?? body.tools)
+  let base = state?.base
+  if (!base && recovery.history && system !== undefined) base = upToLastAssistant(recovery.history)
+  if (!base) return { ok: false, message: LOST }
   const delta = Array.isArray(body.messages) ? body.messages : []
-  return {
-    ok: true,
-    body: {
-      ...body,
-      system: systemIsEmpty(body.system) ? state.system : body.system,
-      tools: Array.isArray(body.tools) ? body.tools : state.tools,
-      messages: [...state.base, ...delta],
-    },
-  }
+  return { ok: true, body: { ...body, system, tools, messages: [...base, ...delta] } }
 }
 
 // Records the step: the messages sent plus the assistant turn the engine now
@@ -160,5 +169,59 @@ export function normalizeBody(body: any): any {
   else out.system = Array.isArray(system) ? system.map(cleanCache) : system
   if (tools.length) out.tools = tools.map(cleanTool)
   else delete out.tools
+  capBreakpoints(out)
   return out
+}
+
+// Cache breakpoints. The engine marks each step's newest message, so a
+// conversation rebuilt from state carries one per earlier step, and Anthropic
+// rejects more than 4. Only the last breakpoint in the messages is kept; then,
+// if tools and system still bring the total over 4, the earliest go first
+// (tools come before system in the prompt). Copies, never the inputs.
+const MAX_BREAKPOINTS = 4
+
+const hasCache = (b: any): boolean => !!b && typeof b === 'object' && b.cache_control !== undefined
+
+function noCache(b: any): any {
+  const { cache_control: _, ...rest } = b
+  return rest
+}
+
+function capBreakpoints(out: any): void {
+  let kept = false
+  // Walk backwards; the first breakpoint met is the last one, and stays.
+  const keepFirstMet = (b: any): any => {
+    if (!hasCache(b)) return b
+    if (!kept) {
+      kept = true
+      return b
+    }
+    return noCache(b)
+  }
+  for (let i = out.messages.length - 1; i >= 0; i--) {
+    const m = out.messages[i]
+    if (!Array.isArray(m?.content)) continue
+    const content = [...m.content]
+    for (let j = content.length - 1; j >= 0; j--) {
+      // A block's own breakpoint ends it, after its inner content.
+      let b = keepFirstMet(content[j])
+      if (b?.type === 'tool_result' && Array.isArray(b.content)) {
+        const inner = [...b.content]
+        for (let k = inner.length - 1; k >= 0; k--) inner[k] = keepFirstMet(inner[k])
+        b = { ...b, content: inner }
+      }
+      content[j] = b
+    }
+    out.messages[i] = { ...m, content }
+  }
+  const lists = [out.tools, out.system].filter(Array.isArray) as any[][]
+  let excess = lists.reduce((n, l) => n + l.filter(hasCache).length, 0) + (kept ? 1 : 0) - MAX_BREAKPOINTS
+  for (const l of lists) {
+    for (let i = 0; i < l.length && excess > 0; i++) {
+      if (hasCache(l[i])) {
+        l[i] = noCache(l[i])
+        excess--
+      }
+    }
+  }
 }

@@ -2,12 +2,8 @@
 // Only fields a provider understands are kept; first-party fields (metadata,
 // context_management, safeguards, thread, diagnostics, stream, thinking,
 // output_config, ...) are dropped by the allow list. The model is replaced and
-// max_tokens comes from the routed model's limits, not the captured value
-// (the engine sizes it for an unknown model id).
-
-import type { Route } from './route.ts'
-
-export type Flavor = 'anthropic' | 'openai'
+// max_tokens comes from the routed model's limits (limits.ts), not the
+// captured value (the engine sizes it for an unknown model id).
 
 export type ProviderRequest = {
   model: string
@@ -22,38 +18,7 @@ export type ProviderRequest = {
   top_k?: unknown
 }
 
-export type Built = { request: ProviderRequest; effort: string | number | undefined }
-
 const KEEP = ['system', 'tool_choice', 'stop_sequences', 'temperature', 'top_p', 'top_k'] as const
-
-// Max output tokens per routed model (prefix match on the id).
-const MAX_OUTPUT: [string, number][] = [
-  ['openai:gpt-5', 128000],
-  ['openai:gpt-4.1', 32768],
-  ['openai:gpt-4o', 16384],
-  ['openai:o3', 100000],
-  ['openai:o4-mini', 100000],
-  ['anthropic:claude-opus', 32000],
-  ['anthropic:claude-sonnet', 64000],
-  ['anthropic:claude-haiku', 64000],
-  ['zai:glm', 32768],
-]
-
-export const DEFAULT_MAX_TOKENS = 8192
-
-export function routeKey(r: Route): string {
-  return r.provider === 'custom' ? `custom:${r.name}:${r.model}` : `${r.provider}:${r.model}`
-}
-
-export function maxOutputTokens(r: Route): number {
-  const key = routeKey(r)
-  for (const [p, n] of MAX_OUTPUT) if (key.startsWith(p)) return n
-  return DEFAULT_MAX_TOKENS
-}
-
-export function flavorOf(r: Route): Flavor {
-  return r.provider === 'anthropic' || r.provider === 'zai' ? 'anthropic' : 'openai'
-}
 
 // Names of deferred tools loaded so far (by a `tool_reference` block).
 function referencedTools(messages: any[]): Set<string> {
@@ -69,9 +34,10 @@ function referencedTools(messages: any[]): Set<string> {
   return names
 }
 
-// OpenAI-compatible providers know neither deferred tools nor
-// `tool_reference` blocks: a deferred tool is sent once loaded (else dropped)
-// and a reference becomes plain text.
+// No routed provider takes deferred tools or `tool_reference` blocks (on the
+// Claude Platform they need a beta the router does not send; OpenAI-compatible
+// servers do not know them): a deferred tool is sent once loaded (else
+// dropped) and a reference becomes plain text.
 function flattenBlock(b: any): any {
   if (b?.type === 'tool_reference') return { type: 'text', text: `Tool loaded: ${b.tool_name}` }
   if (b?.type === 'tool_result' && Array.isArray(b.content)) return { ...b, content: b.content.map(flattenBlock) }
@@ -92,18 +58,13 @@ function flattenTools(tools: any[], loaded: Set<string>): any[] {
     })
 }
 
-export function buildRequest(body: any, route: Route, e: { effort?: string | number }): Built {
+export function buildRequest(body: any, model: string, maxTokens: number): ProviderRequest {
   const messages: any[] = Array.isArray(body?.messages) ? body.messages : []
-  const request: ProviderRequest = { model: route.model, max_tokens: maxOutputTokens(route), messages }
+  const request: ProviderRequest = { model, max_tokens: maxTokens, messages: flattenMessages(messages) }
   for (const k of KEEP) if (body?.[k] !== undefined) (request as any)[k] = body[k]
-  if (Array.isArray(body?.tools) && body.tools.length) request.tools = body.tools
-  if (flavorOf(route) === 'openai') {
-    const loaded = referencedTools(messages)
-    request.messages = flattenMessages(messages)
-    if (request.tools) {
-      request.tools = flattenTools(request.tools, loaded)
-      if (!request.tools.length) delete request.tools
-    }
+  if (Array.isArray(body?.tools) && body.tools.length) {
+    const tools = flattenTools(body.tools, referencedTools(messages))
+    if (tools.length) request.tools = tools
   }
-  return { request, effort: e.effort }
+  return request
 }

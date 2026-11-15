@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Route model requests by model-id prefix (anthropic:, openai:, zai:, custom:) to other providers, while unprefixed models stay on your Claude subscription.",
   "license": "MIT",
+  "author": { "name": "cc-provider-router contributors" },
+  "homepage": "https://github.com/oleggohman/cc-provider-router",
+  "repository": "https://github.com/oleggohman/cc-provider-router",
   "userConfig": {
     "openaiApiKey": { "type": "string", "title": "OpenAI API key", "description": "Key for openai: models. Overrides env OPENAI_API_KEY.", "sensitive": true, "required": false },
     "anthropicApiKey": { "type": "string", "title": "Anthropic Platform API key", "description": "Key for anthropic: models. Overrides env ROUTER_ANTHROPIC_API_KEY.", "sensitive": true, "required": false },

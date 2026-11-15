@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { routedStep } from './register.ts'
 import { errorChunks, localError, providerError, sanitize } from './errors.ts'
+import { sleeper } from '../tests/harness.ts'
 
 describe('providerError', () => {
   test('status maps to a message with the provider text', () => {
@@ -32,11 +33,22 @@ describe('providerError', () => {
     expect(localError('openai', 'Bearer sk-anything-long-enough').text).not.toContain('sk-anything')
     expect(sanitize('a configured-secret-value b', ['configured-secret-value'])).toBe('a [redacted] b')
   })
+
+  test('sanitize caps at 500 characters with ..., after redacting (no key half survives the cut)', () => {
+    const key = 'configured-secret-value-1234'
+    const text = `${'x'.repeat(490)}${key}${'y'.repeat(100)}`
+    const out = sanitize(text, [key])
+    expect(out.length).toBe(503)
+    expect(out.endsWith('...')).toBe(true)
+    expect(out).not.toContain('configured-secret')
+    expect(out).toContain('[redac')
+    expect(sanitize('short', [])).toBe('short')
+  })
 })
 
 describe('errorChunks', () => {
   test('one text chunk, a refusal stop with zero usage, and the result', () => {
-    const g = errorChunks({ turnId: 't', index: 2 }, localError('openai', 'no API key'))
+    const g = errorChunks({ turnId: 't', index: 2, model: 'openai:gpt-5' }, localError('openai', 'no API key'))
     const a = g.next()
     const b = g.next()
     const c = g.next()
@@ -44,9 +56,12 @@ describe('errorChunks', () => {
     expect(b.value.kind).toBe('stop')
     expect(b.value.stopReason).toBe('refusal')
     expect(b.value.usage.input_tokens).toBe(0)
+    // TurnUsage names the model.
+    expect(b.value.usage.model).toBe('openai:gpt-5')
     expect(c.done).toBe(true)
     expect(c.value.answer).toBe('[provider-router] openai error: no API key')
     expect(c.value.index).toBe(2)
+    expect(c.value.usage.model).toBe('openai:gpt-5')
   })
 
   test('a parent agent receives the prefixed text from a refusal-stopped subagent step', async () => {
@@ -54,8 +69,10 @@ describe('errorChunks', () => {
     const next = async function* (): AsyncGenerator<any, any> {
       throw new Error('engine unavailable')
     }
-    const cfg = { keys: {}, custom: new Map(), contextWindows: new Map(), warnings: [] }
-    const g = routedStep(e, next, { provider: 'zai', model: 'glm-5.3' }, cfg as any)
+    // A key, so the step gets past the key check and the engine is asked.
+    const cfg = { keys: { zai: 'k-zai-test-1' }, custom: new Map(), contextWindows: new Map(), warnings: [] }
+    const io = { fetch: async () => ({ status: 200, ok: true, text: '{}' }), sleep: sleeper().sleep, signal: new AbortController().signal }
+    const g = routedStep(e, next, { provider: 'zai', model: 'glm-5.3' }, cfg as any, io, new Map())
     const chunks: any[] = []
     let s = await g.next()
     while (!s.done) {
@@ -65,5 +82,7 @@ describe('errorChunks', () => {
     expect(s.value.answer.startsWith('[provider-router] zai')).toBe(true)
     expect(s.value.stopReason).toBe('refusal')
     expect(chunks[0].text.startsWith('[provider-router]')).toBe(true)
+    expect(s.value.answer).toContain('shadow request failed')
+    expect(s.value.answer).toContain('engine unavailable')
   })
 })

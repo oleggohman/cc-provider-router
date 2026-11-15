@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { createTracker, maybeCompact, trackUsage, withContextHint } from './context.ts'
+import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
 import { loadConfig, missingKeyMessage } from './config.ts'
 import { localError, providerError } from './errors.ts'
 import { listModels, providersCommand } from './providers-command.ts'
@@ -80,7 +80,7 @@ describe('no key value in any output', () => {
         resetShadow()
         const p = echoingProvider(status)
         const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-        outputs.push(await drain(routedStep(step(r.model), engine().next, r.route as any, c, io)))
+        outputs.push(await drain(routedStep(step(r.model), engine().next, r.route as any, c, io, new Map())))
         expect(p.calls.length).toBe(1)
       }
     }
@@ -88,21 +88,22 @@ describe('no key value in any output', () => {
       resetShadow()
       const p = provider([new Error(`socket hang up, auth ${ALL.join(' ')}`)])
       const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-      outputs.push(await drain(routedStep(step(r.model, { agentId: 'ag-1' }), engine().next, r.route as any, c, io)))
+      outputs.push(await drain(routedStep(step(r.model, { agentId: 'ag-1' }), engine().next, r.route as any, c, io, new Map())))
     }
     // Success: a provider whose reply text quotes nothing secret.
     resetShadow()
     const ok = provider([{ status: 200, text: JSON.stringify({ choices: [{ message: { content: 'fine' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 1 } }) }])
-    outputs.push(await drain(routedStep(step('openai:gpt-5'), engine().next, ROUTES[0].route as any, c, { fetch: ok.fetch, sleep: sleeper().sleep, signal: new AbortController().signal })))
+    outputs.push(await drain(routedStep(step('openai:gpt-5'), engine().next, ROUTES[0].route as any, c, { fetch: ok.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }, new Map())))
     assertClean('routed steps', outputs)
     expect(shadowStats().shadowLeaks).toBe(0)
   })
 
   test('routed step with a missing key and an unknown custom endpoint', async () => {
     const c = await loadConfig({ env: { get: async () => undefined } }, { ...OPTIONS, openaiApiKey: '' })
+    const io = { fetch: echoingProvider(200).fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
     const outputs = [
-      await drain(routedStep(step('openai:gpt-5'), engine().next, { provider: 'openai', model: 'gpt-5' }, c)),
-      await drain(routedStep(step('custom:nope:x'), engine().next, { provider: 'custom', name: 'nope', model: 'x' }, c)),
+      await drain(routedStep(step('openai:gpt-5'), engine().next, { provider: 'openai', model: 'gpt-5' }, c, io, new Map())),
+      await drain(routedStep(step('custom:nope:x'), engine().next, { provider: 'custom', name: 'nope', model: 'x' }, c, io, new Map())),
     ]
     assertClean('missing key', outputs)
   })
@@ -123,11 +124,13 @@ describe('no key value in any output', () => {
       outputs.push(withContextHint(err, undefined), withContextHint(err, 'ag-1'))
       outputs.push(localError('zai', `boom ${k}`, ALL))
     }
-    const t = createTracker()
+    const t: UsageMap = new Map()
     const c = await loadConfig(env, OPTIONS)
-    const r = await drain(trackUsage(t, step('openai:gpt-5'), routedStep(step('openai:gpt-5'), engine().next, ROUTES[0].route as any, c, { fetch: echoingProvider(401).fetch, sleep: sleeper().sleep, signal: new AbortController().signal })))
-    outputs.push(r, t.get(undefined))
-    maybeCompact(t, c.contextWindows, { turnId: 't1' }, { after: (_ms, fn) => (fn(), { cancel() {} }), compact: async () => ({ skip: 'no' }) })
+    const e = step('openai:gpt-5')
+    const r = await drain(routedStep(e, engine().next, ROUTES[0].route as any, c, { fetch: echoingProvider(401).fetch, sleep: sleeper().sleep, signal: new AbortController().signal }, new Map()))
+    recordUsage(t, 'main', e.model, r.result.usage)
+    outputs.push(r, t.get('main'))
+    maybeCompact(t, c.contextWindows, { after: (_ms, fn) => (fn(), { cancel() {} }), compact: async () => ({ skip: 'no' }) })
     assertClean('context', outputs)
   })
 

@@ -10,6 +10,12 @@
 // - While a loop has a pending shadow, every engine request for that loop is
 //   answered locally (stub for the one match, a non-retryable 400 otherwise).
 // - Any engine request naming SHADOW_MODEL that matches no entry is refused.
+// - Any other request whose body's model (or URL) is SHADOW_MODEL, whose
+//   unparseable text names it, or whose unreadable body arrives while a
+//   shadow is pending, is refused too (counted in shadowLeaks when it names
+//   the shadow model).
+// - If the `http.fetch` hook itself fails, its `.catch` (shadowFetchFailed)
+//   refuses anything that could be a shadow.
 // - The stub reports zero usage; its chunks are drained and never yielded.
 
 export const SHADOW_MODEL = 'provider-router-shadow'
@@ -48,9 +54,15 @@ function header(headers: Record<string, string> | undefined, name: string): stri
   return undefined
 }
 
-// Loop of an engine request: the subagent's id, `main` when absent.
+// The loop key of an agent id: the subagent's id, `main` when absent. The one
+// source for shadow, thread and usage state.
+export function loopKeyOf(agentId: string | undefined): string {
+  return agentId || 'main'
+}
+
+// Loop of an engine request, from its agent header.
 export function loopKey(headers: Record<string, string> | undefined): string {
-  return header(headers, 'x-claude-code-agent-id') || 'main'
+  return loopKeyOf(header(headers, 'x-claude-code-agent-id'))
 }
 
 // Engine requests carry `compress` and the session header; the mod's own
@@ -96,10 +108,18 @@ function parse(body: unknown): any | null {
   }
 }
 
+// For a body that is not JSON: text naming the shadow model, or bytes we
+// cannot read while any shadow is pending (possibly a compressed shadow).
 function mentionsShadow(body: unknown): boolean {
   if (typeof body === 'string') return body.includes(SHADOW_MODEL)
-  // Bytes we cannot read: possibly a shadow while any shadow is pending.
   return body !== undefined && body !== null && pending.size > 0
+}
+
+// A request that is a shadow by its parsed model, its URL (a provider that
+// puts the model in the path), or by the fallbacks above when unparseable.
+function namesShadow(e: FetchEvent, body: any | null): boolean {
+  if (e.url.includes(SHADOW_MODEL)) return true
+  return body ? body.model === SHADOW_MODEL : mentionsShadow(e.init?.body)
 }
 
 // `e.messageCount` counts the loop's stored rows (reminders, attachments,
@@ -113,17 +133,19 @@ function countMatches(messages: unknown, expected: number): boolean {
 // `http.fetch` hook. Returns the local answer, or calls `next` only for
 // requests that are clearly not shadows.
 export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) => R): Promise<R | { value: FetchResponse }> {
+  const body = parse(e.init?.body)
   if (!isEngineRequest(e)) {
-    // Defence in depth: never pass anything naming the shadow model.
-    if (typeof e.init?.body === 'string' && e.init.body.includes(SHADOW_MODEL)) {
-      counters.shadowLeaks++
+    // Defence in depth: never pass anything that could be a shadow. A routed
+    // provider request whose conversation merely quotes the shadow model's
+    // name parses, with its own model, and goes on.
+    if (namesShadow(e, body)) {
+      if (e.url.includes(SHADOW_MODEL) || typeof e.init?.body === 'string') counters.shadowLeaks++
       return { value: refuse() }
     }
     return next(e)
   }
   const key = loopKey(e.init?.headers)
   const p = pending.get(key)
-  const body = parse(e.init?.body)
   if (p) {
     if (body && body.model === SHADOW_MODEL && p.body === undefined && countMatches(body.messages, p.messageCount)) {
       p.body = body
@@ -133,17 +155,29 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
     // request, a side request, a retry): refused, never passed.
     return { value: refuse() }
   }
-  if (body ? body.model === SHADOW_MODEL : mentionsShadow(e.init?.body)) return { value: refuse() }
+  if (namesShadow(e, body)) return { value: refuse() }
   return next(e)
 }
 
-type StepEvent = { agentId?: string; messageCount: number; model: string }
+// The `http.fetch` hook's `.catch`: shadowFetch threw or overran before it
+// answered (a failed guard is otherwise skipped and the request goes on).
+// Already passed on by the hook: replayed. Otherwise anything that could be
+// a shadow is refused: any request while a shadow is pending, or one naming
+// the shadow model anywhere in its URL or text body.
+export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & { readonly called: boolean }): R | { value: FetchResponse } {
+  if (next.called) return next(e)
+  const body = e.init?.body
+  if (pending.size > 0 || e.url.includes(SHADOW_MODEL) || (typeof body === 'string' && body.includes(SHADOW_MODEL))) return { value: refuse() }
+  return next(e)
+}
+
+export type ShadowStepEvent = { agentId?: string; messageCount: number; model: string }
 
 // Runs the shadow step for `e` and returns the engine's captured request.
 // Throws ShadowError when no request was captured or the loop already has a
 // pending shadow. The stub's chunks are drained here and never yielded.
-export async function shadowStep<E extends StepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>): Promise<any> {
-  const key = e.agentId || 'main'
+export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>): Promise<any> {
+  const key = loopKeyOf(e.agentId)
   if (pending.has(key)) {
     counters.shadowRefused++
     throw new ShadowError(`a shadow step is already pending for loop ${key}`)

@@ -71,6 +71,11 @@ describe('normalizeStop', () => {
     expect(normalizeStop(undefined, true)).toBe('tool_use')
     expect(normalizeStop('end_turn', true)).toBe('tool_use')
   })
+
+  test('tool_use without a tool call that survived parsing ends the turn', () => {
+    expect(normalizeStop('tool_use', false)).toBe('end_turn')
+    expect(normalizeStop('tool_use', true)).toBe('tool_use')
+  })
 })
 
 describe('toResult', () => {

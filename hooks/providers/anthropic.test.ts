@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, complete } from './anthropic.ts'
+import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, complete, parseMessage } from './anthropic.ts'
 import { routedStep } from '../register.ts'
 import { SHADOW_MODEL, resetShadow, shadowFetch, shadowStats } from '../shadow.ts'
 
@@ -138,6 +138,17 @@ describe('anthropic adapter', () => {
   })
 })
 
+describe('parseMessage', () => {
+  test('empty text blocks are dropped (never stored in the thread, which Anthropic would reject)', () => {
+    const r = parseMessage(JSON.stringify({ content: [{ type: 'text', text: '' }, { type: 'tool_use', id: 'c1', name: 'Bash', input: {} }], stop_reason: 'tool_use' }), 'm')!
+    expect(r.content).toEqual([{ type: 'tool_use', id: 'c1', name: 'Bash', input: {} }])
+  })
+
+  test('stop_reason tool_use without a tool block ends the turn', () => {
+    expect(parseMessage(JSON.stringify({ content: [{ type: 'text', text: 'hi' }], stop_reason: 'tool_use' }), 'm')!.stopReason).toBe('end_turn')
+  })
+})
+
 describe('zai row', () => {
   test('Bearer header, Z.ai base URL, no x-api-key', async () => {
     const p = provider([{ status: 200, text: OK_TEXT }])
@@ -237,7 +248,7 @@ describe('routed step: anthropic and zai', () => {
     const p = provider([{ status: 200, text: TOOL_TEXT }])
     const s = sleeper()
     const io = { fetch: p.fetch, sleep: s.sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('anthropic:claude-sonnet-4-5'), eng.next, { provider: 'anthropic', model: 'claude-sonnet-4-5' }, CFG({ anthropic: KEY }), io))
+    const { chunks, result } = await drain(routedStep(step('anthropic:claude-sonnet-4-5'), eng.next, { provider: 'anthropic', model: 'claude-sonnet-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
     expect(eng.seen[0].model).toBe(SHADOW_MODEL)
     expect(eng.network.length).toBe(0)
     expect(p.calls.length).toBe(1)
@@ -266,7 +277,7 @@ describe('routed step: anthropic and zai', () => {
     const eng = engine()
     const p = provider([{ status: 200, text: OK_TEXT }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('zai:glm-5.3', { agentId: 'sub-7' }), eng.next, { provider: 'zai', model: 'glm-5.3' }, CFG({ zai: ZKEY }), io))
+    const { chunks, result } = await drain(routedStep(step('zai:glm-5.3', { agentId: 'sub-7' }), eng.next, { provider: 'zai', model: 'glm-5.3' }, CFG({ zai: ZKEY }), io, new Map()))
     expect(eng.network.length).toBe(0)
     expect(p.calls[0]!.url).toBe('https://api.z.ai/api/anthropic/v1/messages')
     expect(p.calls[0]!.init.headers.authorization).toBe(`Bearer ${ZKEY}`)
@@ -280,7 +291,7 @@ describe('routed step: anthropic and zai', () => {
     const eng = engine()
     const p = provider([{ status: 200, text: OK_TEXT }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('anthropic:claude-opus-4-6'), eng.next, { provider: 'anthropic', model: 'claude-opus-4-6' }, CFG({}), io))
+    const { chunks, result } = await drain(routedStep(step('anthropic:claude-opus-4-6'), eng.next, { provider: 'anthropic', model: 'claude-opus-4-6' }, CFG({}), io, new Map()))
     expect(eng.seen.length).toBe(0)
     expect(p.calls.length).toBe(0)
     expect(chunks[0].text).toContain('ROUTER_ANTHROPIC_API_KEY')
@@ -292,7 +303,7 @@ describe('routed step: anthropic and zai', () => {
     resetShadow()
     const p = provider([{ status: 401, text: JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `bad key ${KEY}` } }) }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { chunks, result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io))
+    const { chunks, result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
     expect(result.answer.startsWith('[provider-router] anthropic error 401')).toBe(true)
     expect(JSON.stringify(chunks)).not.toContain(KEY)
     expect(JSON.stringify(result)).not.toContain(KEY)
@@ -304,7 +315,7 @@ describe('routed step: anthropic and zai', () => {
       throw new Error(`connect ECONNREFUSED (auth ${KEY})`)
     }
     const io = { fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const { result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io))
+    const { result } = await drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
     expect(result.answer).toContain('[provider-router] anthropic error')
     expect(result.answer).toContain('ECONNREFUSED')
     expect(result.answer).not.toContain(KEY)
@@ -316,7 +327,7 @@ describe('routed step: anthropic and zai', () => {
     const s = sleeper()
     const fetch = () => new Promise<any>(() => {})
     const io = { fetch, sleep: s.sleep, signal: new AbortController().signal, timeoutMs: 1234 }
-    const g = routedStep(step('zai:glm-5.3'), engine().next, { provider: 'zai', model: 'glm-5.3' }, CFG({ zai: ZKEY }), io)
+    const g = routedStep(step('zai:glm-5.3'), engine().next, { provider: 'zai', model: 'glm-5.3' }, CFG({ zai: ZKEY }), io, new Map())
     const pending = drain(g)
     for (let i = 0; i < 10 && !s.calls.length; i++) await tick()
     expect(s.calls[0]!.ms).toBe(1234)
@@ -332,7 +343,7 @@ describe('routed step: anthropic and zai', () => {
     const ctl = new AbortController()
     const fetch = () => new Promise<any>(() => {})
     const io = { fetch, sleep: s.sleep, signal: ctl.signal }
-    const pending = drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io))
+    const pending = drain(routedStep(step('anthropic:claude-haiku-4-5'), engine().next, { provider: 'anthropic', model: 'claude-haiku-4-5' }, CFG({ anthropic: KEY }), io, new Map()))
     for (let i = 0; i < 10 && !s.calls.length; i++) await tick()
     ctl.abort()
     const { chunks, result } = await pending
@@ -352,8 +363,9 @@ describe('routed step: anthropic and zai', () => {
 // env through `register`, the provider row is picked, and nothing reaches
 // the network.
 
+// No resetShadow() here: the kit runs the mod in its own module instance, so
+// this file's shadow state is not the mod's.
 function pluginEnv($: any, on: any, envName: string | undefined, key: string) {
-  resetShadow()
   on('clock.sleep', () => ({ value: undefined }) as any)
   on('env.get', (_$: any, e: any) => ({ value: e.name === envName ? key : undefined }) as any)
   const net: any[] = []

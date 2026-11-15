@@ -12,60 +12,32 @@
 // provider says the context is too long.
 
 import type { ErrorReply } from './errors.ts'
+import { windowFor } from './limits.ts'
 
 export const COMPACT_AT = 0.85
 
 const MAIN = 'main'
 
-function loopOf(agentId: string | undefined): string {
-  return agentId || MAIN
-}
-
-// The known context window of a prefixed model id, if any.
-export function windowFor(model: string, windows: ReadonlyMap<string, number>): number | undefined {
-  return windows.get(model)
-}
-
+// Last routed input size per loop key: what the next request starts from.
 export type LoopUsage = { model: string; inputTokens: number }
-
-export type Tracker = {
-  record(agentId: string | undefined, model: string, usage: unknown): void
-  clear(agentId: string | undefined): void
-  get(agentId: string | undefined): LoopUsage | undefined
-}
+export type UsageMap = Map<string, LoopUsage>
 
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0
 }
 
-// Last routed step's input size per loop: what the next request starts from.
-export function createTracker(): Tracker {
-  const loops = new Map<string, LoopUsage>()
-  return {
-    record(agentId, model, usage) {
-      if (!usage || typeof usage !== 'object') return
-      const u = usage as Record<string, unknown>
-      const inputTokens = num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens)
-      loops.set(loopOf(agentId), { model, inputTokens })
-    },
-    clear(agentId) {
-      loops.delete(loopOf(agentId))
-    },
-    get(agentId) {
-      return loops.get(loopOf(agentId))
-    },
-  }
+export function inputTokensOf(usage: unknown): number {
+  if (!usage || typeof usage !== 'object') return 0
+  const u = usage as Record<string, unknown>
+  return num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens)
 }
 
-// Passes a routed step through and records its result's usage for its loop.
-export async function* trackUsage<Y, R>(
-  tracker: Tracker,
-  e: { readonly model: string; readonly agentId?: string },
-  inner: AsyncGenerator<Y, R, unknown>,
-): AsyncGenerator<Y, R, unknown> {
-  const result = yield* inner
-  tracker.record(e.agentId, e.model, (result as { usage?: unknown } | undefined)?.usage)
-  return result
+// Records a routed step's input size for its loop. A step without an input
+// count (an error reply reports zero, a cancelled one none) keeps the
+// previous record, so a failure after a large step still leads to compaction.
+export function recordUsage(map: UsageMap, key: string, model: string, usage: unknown): void {
+  const inputTokens = inputTokensOf(usage)
+  if (inputTokens > 0) map.set(key, { model, inputTokens })
 }
 
 export type CompactDeps = {
@@ -73,25 +45,16 @@ export type CompactDeps = {
   compact: () => Promise<unknown>
 }
 
-// Called from `turn.complete` after `next(e)` returned. Main loop only.
-// Returns whether a compaction was scheduled. The loop's record is cleared
-// once acted on, so a skipped (`{ skip }`) or failed compaction is not
+// Called from `turn.complete` of the main loop after `next(e)` returned.
+// Returns whether a compaction was scheduled. The main loop's record is
+// cleared once acted on, so a skipped (`{ skip }`) or failed compaction is not
 // retried for the same usage; the next routed step records afresh.
-export function maybeCompact(
-  tracker: Tracker,
-  windows: ReadonlyMap<string, number>,
-  e: { readonly agentId?: string; readonly turnId?: string },
-  deps: CompactDeps,
-): boolean {
-  if (e.agentId) {
-    tracker.clear(e.agentId)
-    return false
-  }
-  const rec = tracker.get(undefined)
+export function maybeCompact(map: UsageMap, windows: ReadonlyMap<string, number>, deps: CompactDeps): boolean {
+  const rec = map.get(MAIN)
   if (!rec) return false
   const window = windowFor(rec.model, windows)
   if (!window || rec.inputTokens < window * COMPACT_AT) return false
-  tracker.clear(undefined)
+  map.delete(MAIN)
   const run = async () => {
     try {
       // A `{ skip }` answer is a veto: accepted as is.

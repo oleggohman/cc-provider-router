@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { listModels, providersCommand, statusText } from './providers-command.ts'
+import { LIST_TIMEOUT_MS, listModels, providersCommand, statusText } from './providers-command.ts'
 import { cfg, provider } from '../tests/harness.ts'
 
 // The command takes a fetch function; tests pass a stand-in. No live
@@ -130,6 +130,23 @@ describe('providersCommand', () => {
     expect(t).toContain('custom:gw')
     expect(t).toContain('unreadable model list')
     for (const k of [OA, AN, ZA, GW]) expect(t).not.toContain(k)
+  })
+})
+
+describe('models: timeout', () => {
+  test('a provider that never answers is reported after the timeout; the others still list', async () => {
+    const hanging = (url: string, _init: any) => (url.includes('gateway') ? new Promise<any>(() => {}) : Promise.resolve({ status: 200, ok: true, text: openaiList(['m1']) }))
+    const timers: number[] = []
+    // A sleep that fires at once: the hanging fetch loses, answered ones win (they resolve first).
+    const sleep = async (ms: number) => {
+      timers.push(ms)
+      for (let i = 0; i < 50; i++) await Promise.resolve()
+    }
+    const c = cfg({}, { custom: new Map([['gw', { url: 'http://gateway.example.internal:4000/v1', key: undefined }], ['local', { url: 'http://localhost:8000/v1', key: undefined }]]) })
+    const out = await listModels(hanging as any, c, sleep)
+    expect(out).toContain('custom:gw: no answer within 20 s')
+    expect(out).toContain('custom:local: 1 model')
+    expect(timers.every(ms => ms === LIST_TIMEOUT_MS)).toBe(true)
   })
 })
 

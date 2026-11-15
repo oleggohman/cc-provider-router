@@ -3,39 +3,41 @@
 // (`/providers models`) each provider's model list from `GET /v1/models`.
 // No discovery at session start, no cache, no status line.
 
-import type { Config } from './config.ts'
+import { raceCall, type Sleep } from './call.ts'
+import { KEY_SOURCES, secretsOf, type Config, type KeyedProvider } from './config.ts'
 import { localError, providerError, redact } from './errors.ts'
-import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, type FetchResponse } from './providers/anthropic.ts'
+import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, authHeader, type AnthropicRow, type FetchResponse } from './providers/anthropic.ts'
 import { OPENAI_BASE } from './providers/openai.ts'
 
 export type ListFetch = (url: string, init: { method: 'GET'; headers: Record<string, string> }) => Promise<FetchResponse>
 
 export type ShadowCounters = { shadowLeaks: number; shadowRefused: number }
 
+// A built-in provider (`keyed`) needs a key; a custom endpoint may run
+// without one. `anthropic` rows carry their auth header kind.
 type Row = {
   label: string
-  shape: 'anthropic' | 'openai'
   baseUrl: string
   key: string | undefined
-  // Built-in providers need a key; a custom endpoint may run without one.
-  needsKey: boolean
-  keyHint?: string
+  keyed?: KeyedProvider
+  anthropic?: AnthropicRow
 }
+
+// How long `/providers models` waits for one provider's list.
+export const LIST_TIMEOUT_MS = 20_000
 
 function rows(cfg: Config): Row[] {
   const out: Row[] = [
-    { label: 'anthropic', shape: 'anthropic', baseUrl: ANTHROPIC_ROWS.anthropic.baseUrl, key: cfg.keys.anthropic, needsKey: true, keyHint: 'ROUTER_ANTHROPIC_API_KEY or /config anthropicApiKey' },
-    { label: 'openai', shape: 'openai', baseUrl: OPENAI_BASE, key: cfg.keys.openai, needsKey: true, keyHint: 'OPENAI_API_KEY or /config openaiApiKey' },
-    { label: 'zai', shape: 'anthropic', baseUrl: ANTHROPIC_ROWS.zai.baseUrl, key: cfg.keys.zai, needsKey: true, keyHint: 'ZAI_API_KEY or /config zaiApiKey' },
+    { label: 'anthropic', baseUrl: ANTHROPIC_ROWS.anthropic.baseUrl, key: cfg.keys.anthropic, keyed: 'anthropic', anthropic: ANTHROPIC_ROWS.anthropic },
+    { label: 'openai', baseUrl: OPENAI_BASE, key: cfg.keys.openai, keyed: 'openai' },
+    { label: 'zai', baseUrl: ANTHROPIC_ROWS.zai.baseUrl, key: cfg.keys.zai, keyed: 'zai', anthropic: ANTHROPIC_ROWS.zai },
   ]
-  for (const [name, ep] of cfg.custom) {
-    out.push({ label: `custom:${name}`, shape: 'openai', baseUrl: ep.url, key: ep.key, needsKey: false, keyHint: 'ROUTER_CUSTOM_API_KEYS' })
-  }
+  for (const [name, ep] of cfg.custom) out.push({ label: `custom:${name}`, baseUrl: ep.url, key: ep.key })
   return out
 }
 
-function secretsOf(cfg: Config): string[] {
-  return [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)].filter((k): k is string => !!k)
+function keyHint(p: KeyedProvider): string {
+  return `${KEY_SOURCES[p].env} or /config ${KEY_SOURCES[p].field}`
 }
 
 // A URL as shown: without user info (`user:pass@`).
@@ -48,7 +50,7 @@ export function statusText(cfg: Config, stats: ShadowCounters): string {
   const width = Math.max(...list.map(r => r.label.length))
   const lines = ['provider-router']
   for (const r of list) {
-    const key = r.key ? 'yes' : r.needsKey ? `no (set ${r.keyHint})` : 'no'
+    const key = r.key ? 'yes' : r.keyed ? `no (set ${keyHint(r.keyed)})` : 'no'
     lines.push(`  ${r.label.padEnd(width)}  ${shownUrl(r.baseUrl)}  key: ${key}`)
   }
   if (cfg.custom.size === 0) lines.push('  custom: none (add name=url to the /config field customEndpoints)')
@@ -70,19 +72,13 @@ function parseIds(text: string): string[] | null {
   }
 }
 
-function prefixFor(label: string): string {
-  return `${label}:`
-}
-
 async function listOne(fetch: ListFetch, r: Row, secrets: string[]): Promise<string> {
-  if (r.needsKey && !r.key) return `${r.label}: skipped (no key)`
-  const headers: Record<string, string> = {}
+  if (r.keyed && !r.key) return `${r.label}: skipped (no key)`
+  let headers: Record<string, string> = {}
   let url: string
-  if (r.shape === 'anthropic') {
+  if (r.anthropic) {
     url = `${r.baseUrl}/v1/models?limit=1000`
-    headers['anthropic-version'] = ANTHROPIC_VERSION
-    if (r.label === 'zai') headers.authorization = `Bearer ${r.key}`
-    else headers['x-api-key'] = r.key!
+    headers = { 'anthropic-version': ANTHROPIC_VERSION, ...authHeader(r.anthropic.auth, r.key!) }
   } else {
     url = `${r.baseUrl}/models`
     if (r.key) headers.authorization = `Bearer ${r.key}`
@@ -97,25 +93,34 @@ async function listOne(fetch: ListFetch, r: Row, secrets: string[]): Promise<str
   const ids = parseIds(res.text)
   if (!ids) return localError(r.label, `unreadable model list (status ${res.status})`, secrets).text
   if (ids.length === 0) return `${r.label}: no models listed`
-  const p = prefixFor(r.label)
-  return [`${r.label}: ${ids.length} model${ids.length === 1 ? '' : 's'}`, ...ids.map(id => `  ${p}${redact(id, secrets)}`)].join('\n')
+  return [`${r.label}: ${ids.length} model${ids.length === 1 ? '' : 's'}`, ...ids.map(id => `  ${r.label}:${redact(id, secrets)}`)].join('\n')
+}
+
+// One provider's list, or a line saying it did not answer in time (one
+// hanging endpoint must not stall the command). Without `sleep`, no timer.
+async function listWithin(fetch: ListFetch, r: Row, secrets: string[], sleep: Sleep | undefined): Promise<string> {
+  if (!sleep) return listOne(fetch, r, secrets)
+  const out = await raceCall(sleep, new AbortController().signal, () => listOne(fetch, r, secrets), LIST_TIMEOUT_MS)
+  if (out.kind === 'done') return out.value
+  if (out.kind === 'timeout') return `${r.label}: no answer within ${Math.round(out.ms / 1000)} s`
+  return localError(r.label, `unreachable: ${out.kind === 'failed' ? String(out.error) : 'cancelled'}`, secrets).text
 }
 
 // Every provider's models, fetched now (no cache). Providers without a key
 // are skipped, not called.
-export async function listModels(fetch: ListFetch, cfg: Config): Promise<string> {
+export async function listModels(fetch: ListFetch, cfg: Config, sleep?: Sleep): Promise<string> {
   const list = rows(cfg)
-  if (!list.some(r => r.key || !r.needsKey)) {
+  if (!list.some(r => r.key || !r.keyed)) {
     return 'no provider has a key: set OPENAI_API_KEY, ROUTER_ANTHROPIC_API_KEY or ZAI_API_KEY (or the /config fields), or add a custom endpoint'
   }
   const secrets = secretsOf(cfg)
-  const parts = await Promise.all(list.map(r => listOne(fetch, r, secrets)))
+  const parts = await Promise.all(list.map(r => listWithin(fetch, r, secrets, sleep)))
   return parts.join('\n')
 }
 
-export async function providersCommand(args: string, cfg: Config, fetch: ListFetch, stats: ShadowCounters): Promise<string> {
+export async function providersCommand(args: string, cfg: Config, fetch: ListFetch, stats: ShadowCounters, sleep?: Sleep): Promise<string> {
   const a = args.trim().toLowerCase()
   if (a === '') return statusText(cfg, stats)
-  if (a === 'models') return `${statusText(cfg, stats)}\n\n${await listModels(fetch, cfg)}`
+  if (a === 'models') return `${statusText(cfg, stats)}\n\n${await listModels(fetch, cfg, sleep)}`
   return 'usage: /providers [models]'
 }

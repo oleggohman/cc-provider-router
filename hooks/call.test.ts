@@ -130,6 +130,30 @@ describe('raceCall', () => {
     expect(out.kind).toBe('failed')
   })
 
+  test('a timer that fails without Esc leaves the outcome to the call', async () => {
+    const work = deferred<string>()
+    const failing = (_ms: number) => Promise.reject(new Error('clock refused'))
+    const p = raceCall(failing, new AbortController().signal, () => work.promise, 1000)
+    await tick()
+    work.resolve('reply')
+    expect(await p).toEqual({ kind: 'done', value: 'reply' })
+  })
+
+  test('Esc in the same moment as the reply: cancelled wins', async () => {
+    const s = fakeSleep()
+    const parent = new AbortController()
+    const out = await raceCall(
+      s.sleep,
+      parent.signal,
+      async () => {
+        parent.abort()
+        return 'reply'
+      },
+      1000,
+    )
+    expect(out).toEqual({ kind: 'cancelled' })
+  })
+
   test('a default timeout exists and is generous for non-streamed replies', () => {
     expect(DEFAULT_TIMEOUT_MS).toBeGreaterThanOrEqual(300_000)
   })

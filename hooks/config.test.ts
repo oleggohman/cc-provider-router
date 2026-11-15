@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { loadConfig, missingKeyMessage } from './config.ts'
+import { loadConfig, missingKeyMessage, secretsOf } from './config.ts'
 
 // A stand-in for `$` that holds only `env`: touching any other noun throws,
 // which proves config comes from options + env alone. (The test kit's `$` is
@@ -73,6 +73,20 @@ describe('loadConfig', () => {
     }
   })
 
+  test('a custom endpoint URL with credentials (user:pass@) is skipped; the warning never echoes them', async () => {
+    const c = await loadConfig(fakeEnv({}), { ...EMPTY, customEndpoints: ['gw=https://user:pass-secret-1@gw.example/v1', 'ok=https://ok.example/v1/@path'] })
+    expect([...c.custom.keys()]).toEqual(['ok'])
+    expect(c.warnings.length).toBe(1)
+    expect(c.warnings[0]).toContain('customEndpoints entry 1')
+    expect(c.warnings[0]).toContain('ROUTER_CUSTOM_API_KEYS')
+    expect(c.warnings[0]).not.toContain('pass-secret')
+  })
+
+  test('secretsOf lists every configured key once, built-in and custom', async () => {
+    const c = await loadConfig(fakeEnv({ OPENAI_API_KEY: 'env-oa', ROUTER_CUSTOM_API_KEYS: 'gw=sk-gw' }), { ...EMPTY, zaiApiKey: 'cfg-za', customEndpoints: ['gw=https://gw.example/v1', 'local=http://localhost:1/v1'] })
+    expect(secretsOf(c).sort()).toEqual(['cfg-za', 'env-oa', 'sk-gw'])
+  })
+
   test('malformed ROUTER_CUSTOM_API_KEYS entry warns without echoing the key', async () => {
     const c = await loadConfig(fakeEnv({ ROUTER_CUSTOM_API_KEYS: 'sk-secret-without-name' }), EMPTY)
     expect(c.warnings.length).toBe(1)
@@ -80,12 +94,12 @@ describe('loadConfig', () => {
     expect(c.warnings[0]!.includes('sk-secret')).toBe(false)
   })
 
-  test('context windows: built-in table plus model=tokens entries', async () => {
+  test('context windows: model=tokens entries', async () => {
     const c = await loadConfig(fakeEnv({}), { ...EMPTY, contextWindows: ['openai:my-model=64000', 'custom:gw:llama=8192'] })
     expect(c.contextWindows.get('openai:my-model')).toBe(64000)
     expect(c.contextWindows.get('custom:gw:llama')).toBe(8192)
-    expect(c.contextWindows.get('openai:gpt-5')).toBe(400000)
-    expect(c.contextWindows.get('zai:glm-5.3')).toBe(200000)
+    // Only the entries: built-in windows live in limits.ts.
+    expect(c.contextWindows.size).toBe(2)
   })
 
   test('invalid contextWindows entry warns naming the field', async () => {

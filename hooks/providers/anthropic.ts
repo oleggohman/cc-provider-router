@@ -53,7 +53,8 @@ export function parseMessage(text: string, fallbackModel: string): Reply | null 
   if (!j || typeof j !== 'object' || !Array.isArray(j.content)) return null
   const content: ReplyBlock[] = []
   for (const b of j.content) {
-    if (b?.type === 'text' && typeof b.text === 'string') content.push({ type: 'text', text: b.text })
+    // Empty text blocks are dropped: stored in the thread, Anthropic rejects them.
+    if (b?.type === 'text' && typeof b.text === 'string' && b.text) content.push({ type: 'text', text: b.text })
     else if (b?.type === 'tool_use' && typeof b.id === 'string' && typeof b.name === 'string') content.push({ type: 'tool_use', id: b.id, name: b.name, input: b.input ?? {} })
   }
   const callsTools = content.some(b => b.type === 'tool_use')
@@ -65,10 +66,13 @@ export function parseMessage(text: string, fallbackModel: string): Reply | null 
   }
 }
 
+// The auth header of a row (also used by /providers models).
+export function authHeader(auth: AnthropicRow['auth'], key: string): Record<string, string> {
+  return auth === 'bearer' ? { authorization: `Bearer ${key}` } : { 'x-api-key': key }
+}
+
 export async function complete(fetch: Fetch, req: ProviderRequest, row: AnthropicRow, key: string): Promise<AdapterResult> {
-  const headers: Record<string, string> = { 'content-type': 'application/json', 'anthropic-version': ANTHROPIC_VERSION }
-  if (row.auth === 'bearer') headers.authorization = `Bearer ${key}`
-  else headers['x-api-key'] = key
+  const headers: Record<string, string> = { 'content-type': 'application/json', 'anthropic-version': ANTHROPIC_VERSION, ...authHeader(row.auth, key) }
   const res = await fetch(`${row.baseUrl}/v1/messages`, { method: 'POST', headers, body: JSON.stringify(req) })
   if (!res.ok) return { ok: false, error: providerError(row.label, res.status, res.text, [key]) }
   const reply = parseMessage(res.text, req.model)

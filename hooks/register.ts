@@ -1,63 +1,138 @@
 import type { Register } from 'claude-code'
 import { raceCall, type Sleep } from './call.ts'
 import { toChunks, toResult } from './chunks.ts'
-import { loadConfig, missingKeyMessage, type Config } from './config.ts'
-import { createTracker, maybeCompact, trackUsage, withContextHint } from './context.ts'
+import { loadConfig, missingKeyMessage, secretsOf, type Config } from './config.ts'
+import { maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
 import { errorChunks, localError, sanitize } from './errors.ts'
+import { maxOutputTokens } from './limits.ts'
 import { ANTHROPIC_ROWS, complete as anthropicComplete, type AdapterResult, type Fetch } from './providers/anthropic.ts'
 import { complete as openaiComplete, targetFor } from './providers/openai.ts'
-import { buildRequest } from './request.ts'
+import { buildRequest, type ProviderRequest } from './request.ts'
 import { providersCommand } from './providers-command.ts'
-import { parseModel, type Route } from './route.ts'
-import { shadowFetch, shadowStats, shadowStep } from './shadow.ts'
-import { createThreads, loopKeyOf, normalizeBody, recordStep, resolveThread, type Threads } from './thread.ts'
+import { malformedPrefix, parseModel, type Route } from './route.ts'
+import { loopKeyOf, shadowFetch, shadowFetchFailed, shadowStats, shadowStep, type ShadowStepEvent } from './shadow.ts'
+import { dropBase, normalizeBody, recordStep, resolveThread, type Recovery, type Threads } from './thread.ts'
 
 function label(r: Route): string {
   return r.provider === 'custom' ? `custom:${r.name}` : r.provider
 }
 
+// The prefix of a model id, as the label of an error about it.
+function prefixOf(model: string): string {
+  return model.slice(0, Math.max(0, model.indexOf(':'))) || 'router'
+}
+
+// What the router keeps per loop between steps.
+export type LoopState = { usage: UsageMap; threads: Threads }
+
+// Back on the subscription: the engine tracks this loop's context and thread.
+export function onUnprefixedStep(s: LoopState, agentId: string | undefined): void {
+  const key = loopKeyOf(agentId)
+  s.usage.delete(key)
+  s.threads.delete(key)
+}
+
+// A subagent's turn ended: its usage and conversation (the large part, images
+// included) are freed. Its system prompt and tools stay, so a resumed agent's
+// continue can be rebuilt from the session history.
+export function onSubagentTurnEnd(s: LoopState, agentId: string): void {
+  const key = loopKeyOf(agentId)
+  s.usage.delete(key)
+  dropBase(s.threads, key)
+}
+
+// The loop's conversation in Messages API form, for rebuilding a continue the
+// router has no conversation for; undefined when the session cannot say.
+async function readHistory($: any, agentId: string | undefined): Promise<any[] | undefined> {
+  try {
+    const r = await $.session.messages(agentId ? { as: 'api', agentId } : { as: 'api' })
+    return Array.isArray(r) ? r : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The config, loaded once per module load. A rejected load is not kept: the
+// next call loads again (e.g. after an env read was refused once).
+type ConfigCache = { config?: Promise<Config> }
+
+function cachedConfig($: any, options: Parameters<Register>[1], cache: ConfigCache): Promise<Config> {
+  cache.config ??= loadConfig($, options).catch(err => {
+    cache.config = undefined
+    throw err
+  })
+  return cache.config
+}
+
 // Provider router: routes each model request by its model id's prefix.
 // Unprefixed models go to the engine untouched (the signed-in subscription).
 // Config comes from `options` (a /config change reloads this module) and env,
-// read once on the first routed step.
+// read on the first routed step; a failed read is retried on the next one.
 export const register: Register = (on, options) => {
-  let config: Promise<Config> | undefined
-  // Last routed input size per loop, for compaction (see context.ts).
-  const usage = createTracker()
-  // Each loop's conversation, for the engine's thread continues (see thread.ts).
-  const threads = createThreads()
+  const cache: ConfigCache = {}
+  const state: LoopState = { usage: new Map(), threads: new Map() }
 
   // Shadow capture: answers the engine's shadow requests locally and refuses
-  // every request that could be one (see shadow.ts). Fail closed.
-  on('http.fetch', async (_$, e, next) => shadowFetch(e, next) as any)
+  // every request that could be one (see shadow.ts). Fail closed: a guard
+  // that fails is otherwise skipped and the request goes on.
+  on('http.fetch', async (_$, e, next) => shadowFetch(e, next) as any).catch((_$, e, next) => shadowFetchFailed(e, next) as any)
 
   on('turn.step', async function* ($, e, next) {
     const route = parseModel(e.model)
-    if (!route) {
-      // Back on the subscription: the engine tracks this loop's context.
-      usage.clear(e.agentId)
-      threads.delete(loopKeyOf(e.agentId))
+    const bad = route ? undefined : malformedPrefix(e.model)
+    if (!route && !bad) {
+      onUnprefixedStep(state, e.agentId)
       return yield* next(e)
     }
-    const cfg = await (config ??= loadConfig($, options))
-    const io: StepIO = {
-      fetch: (url, init) => $.http.fetch(url, init),
-      sleep: (ms, opts) => $.clock.sleep(ms, opts),
-      signal: next.signal,
+    // From here on the step never reaches the engine with its own model id:
+    // any failure becomes a local error reply.
+    const key = loopKeyOf(e.agentId)
+    let secrets: string[] = []
+    try {
+      if (!route) {
+        dropBase(state.threads, key)
+        return yield* errorChunks(e, localError(bad!, `malformed model id "${e.model}": use anthropic:<id>, openai:<id>, zai:<id> or custom:<name>:<id>`))
+      }
+      const cfg = await cachedConfig($, options, cache)
+      secrets = secretsOf(cfg)
+      const io: StepIO = {
+        fetch: (url, init) => $.http.fetch(url, init),
+        sleep: (ms, opts) => $.clock.sleep(ms, opts),
+        signal: next.signal,
+        history: () => readHistory($, e.agentId),
+      }
+      const result = yield* routedStep(e, next, route, cfg, io, state.threads)
+      recordUsage(state.usage, key, e.model, result?.usage)
+      return result
+    } catch (err) {
+      dropBase(state.threads, key)
+      return yield* errorChunks(e, localError(prefixOf(e.model), `internal error: ${String(err)}`, secrets))
     }
-    return yield* trackUsage(usage, e, routedStep(e, next, route, cfg, io, threads))
+  }).catch(async function* (_$, e, next) {
+    // The hook itself failed (threw past its own catch, or overran): a routed
+    // model still never reaches the engine.
+    if (!parseModel(e.model) && !malformedPrefix(e.model)) return yield* next(e)
+    return yield* errorChunks(e, localError(prefixOf(e.model), `internal error: ${next.error.message ?? next.error.kind}`))
   })
 
   // Compaction for routed main-loop turns: scheduled after the turn has
   // ended, never inside this hook (compact rejects while a turn runs).
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (!e.agentId && !usage.get(undefined)) return result
-    const cfg = await (config ??= loadConfig($, options))
-    maybeCompact(usage, cfg.contextWindows, e, {
-      after: (ms, fn) => $.clock.after(ms, fn),
-      compact: () => $.session.compact(),
-    })
+    if (e.agentId) {
+      onSubagentTurnEnd(state, e.agentId)
+      return result
+    }
+    if (!state.usage.has(loopKeyOf(undefined))) return result
+    try {
+      const cfg = await cachedConfig($, options, cache)
+      maybeCompact(state.usage, cfg.contextWindows, {
+        after: (ms, fn) => $.clock.after(ms, fn),
+        compact: () => $.session.compact(),
+      })
+    } catch {
+      // Config unavailable: no compaction this turn.
+    }
     return result
   })
 
@@ -71,72 +146,99 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'providers' }, async ($, e) => {
-    const cfg = await (config ??= loadConfig($, options))
+    let secrets: string[] = []
     try {
-      const text = await providersCommand(e.args ?? '', cfg, (url, init) => $.http.fetch(url, init), shadowStats())
+      const cfg = await cachedConfig($, options, cache)
+      secrets = secretsOf(cfg)
+      const text = await providersCommand(e.args ?? '', cfg, (url, init) => $.http.fetch(url, init), shadowStats(), (ms, opts) => $.clock.sleep(ms, opts))
       return { text }
     } catch (err) {
-      const secrets = [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)]
       return { text: sanitize(`[provider-router] /providers failed: ${String(err)}`, secrets) }
     }
   })
 }
 
-type StepEvent = { turnId: string; index: number; model: string; messageCount: number; agentId?: string; effort?: string | number }
+type StepEvent = ShadowStepEvent & { turnId: string; index: number; effort?: string | number }
 
 // What a routed step needs from `$` and `next`; tests pass stand-ins (the
-// test kit refuses `$.http.fetch` from a test's own hooks).
-export type StepIO = { fetch: Fetch; sleep: Sleep; signal: AbortSignal; timeoutMs?: number }
+// test kit refuses `$.http.fetch` from a test's own hooks). `history` reads
+// the loop's conversation from the session (see thread.ts Recovery).
+export type StepIO = { fetch: Fetch; sleep: Sleep; signal: AbortSignal; timeoutMs?: number; history?: () => Promise<any[] | undefined> }
 
 // The step ended by Esc: no chunks, no error text, no response.
 function cancelled(e: { turnId: string; index: number }) {
   return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
 }
 
+// For a continue the loop holds no conversation for: the session history and,
+// for a loop never seen (an engine fork of the main loop), the main loop's
+// system prompt and tools.
+async function recoveryFor(body: any, key: string, threads: Threads, io: StepIO): Promise<Recovery> {
+  if (body?.thread?.type !== 'continue' || threads.get(key)?.base) return {}
+  let history: any[] | undefined
+  try {
+    history = await io.history?.()
+  } catch {
+    history = undefined
+  }
+  const main = loopKeyOf(undefined)
+  return { history, fallback: key === main ? undefined : threads.get(main) }
+}
+
 // A routed step: shadow capture, provider request, reply. The engine's own
 // shadow chunks are drained inside shadowStep and never yielded here.
+//
+// Thread-state invariants (thread.ts): a step that reached the provider and
+// failed is recorded with its error text as the assistant turn (the engine
+// records it so); a cancelled step records nothing; a step that failed before
+// its request was captured drops the loop's conversation, since the engine
+// records an error turn the router cannot place.
 export async function* routedStep<E extends StepEvent>(
   e: E,
   next: (e: E) => AsyncIterable<unknown>,
   route: Route,
   cfg: Config,
-  io?: StepIO,
-  threads: Threads = createThreads(),
+  io: StepIO,
+  threads: Threads,
 ): AsyncGenerator<any, any, unknown> {
-  const secrets = [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)]
+  const secrets = secretsOf(cfg)
   const name = label(route)
+  const key = loopKeyOf(e.agentId)
+  const early = (message: string) => {
+    dropBase(threads, key)
+    return errorChunks(e, localError(name, message, secrets))
+  }
   // Check the key / endpoint before the shadow step: no engine work for a
   // step that cannot be answered.
-  let send: (io: StepIO, built: ReturnType<typeof buildRequest>) => Promise<AdapterResult>
+  let send: (request: ProviderRequest) => Promise<AdapterResult>
   if (route.provider === 'anthropic' || route.provider === 'zai') {
     const row = ANTHROPIC_ROWS[route.provider]
-    const key = cfg.keys[route.provider]
-    if (!key) return yield* errorChunks(e, localError(name, missingKeyMessage(route.provider), secrets))
-    send = (io, built) => anthropicComplete(io.fetch, built.request, row, key)
+    const apiKey = cfg.keys[route.provider]
+    if (!apiKey) return yield* early(missingKeyMessage(route.provider))
+    send = request => anthropicComplete(io.fetch, request, row, apiKey)
   } else {
     const t = targetFor(route, cfg)
-    if (!t.ok) return yield* errorChunks(e, localError(name, t.message, secrets))
-    send = (io, built) => openaiComplete(io.fetch, built.request, built.effort, t.target)
+    if (!t.ok) return yield* early(t.message)
+    send = request => openaiComplete(io.fetch, request, e.effort, t.target)
   }
   let body: any
   try {
     body = await shadowStep(e, next)
   } catch (err) {
-    return yield* errorChunks(e, localError(name, `shadow request failed: ${String(err)}`, secrets))
+    // Esc during the shadow step ends the step as cleanly as Esc during the
+    // provider call.
+    if (io.signal.aborted) return cancelled(e)
+    return yield* early(`shadow request failed: ${String(err)}`)
   }
   // Message threads: rebuild a continue into the full conversation.
-  const key = loopKeyOf(e.agentId)
-  const resolved = resolveThread(body, threads.get(key))
-  if (!resolved.ok) return yield* errorChunks(e, localError(name, resolved.message, secrets))
-  const built = buildRequest(normalizeBody(resolved.body), route, e)
-  if (!io) return yield* errorChunks(e, localError(name, 'no network access in this context', secrets))
-  // The engine records an error step's text as the assistant turn; keep the
-  // same in the loop's state so the next continue lines up.
+  const resolved = resolveThread(body, threads.get(key), await recoveryFor(body, key, threads, io))
+  if (!resolved.ok) return yield* early(resolved.message)
+  const request = buildRequest(normalizeBody(resolved.body), route.model, maxOutputTokens(e.model))
   const fail = (err: ReturnType<typeof localError>) => {
     recordStep(threads, key, resolved.body, [{ type: 'text', text: err.text }])
     return errorChunks(e, err)
   }
-  const out = await raceCall(io.sleep, io.signal, () => send(io, built), io.timeoutMs)
+  const out = await raceCall(io.sleep, io.signal, () => send(request), io.timeoutMs)
   switch (out.kind) {
     case 'cancelled':
       // Nothing recorded: the next continue builds on the last recorded turn.

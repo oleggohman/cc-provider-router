@@ -19,32 +19,20 @@ type Env = { env: { get: (name: string) => Promise<string | undefined> } }
 
 type Options = Readonly<Record<string, string | number | boolean | readonly string[]>>
 
-const KEY_SOURCES: Record<KeyedProvider, { env: string; field: string }> = {
+// Where each provider's key comes from. loadConfig reads the same env names
+// as literals: `$.env.get` accepts only literal names.
+export const KEY_SOURCES: Record<KeyedProvider, { env: string; field: string }> = {
   openai: { env: 'OPENAI_API_KEY', field: 'openaiApiKey' },
   anthropic: { env: 'ROUTER_ANTHROPIC_API_KEY', field: 'anthropicApiKey' },
   zai: { env: 'ZAI_API_KEY', field: 'zaiApiKey' },
 }
 
-// Built-in context windows for common models (tokens).
-const BUILTIN_WINDOWS: Record<string, number> = {
-  'openai:gpt-5': 400000,
-  'openai:gpt-5-mini': 400000,
-  'openai:gpt-5-nano': 400000,
-  'openai:gpt-4.1': 1047576,
-  'openai:gpt-4.1-mini': 1047576,
-  'openai:gpt-4o': 128000,
-  'openai:gpt-4o-mini': 128000,
-  'openai:o3': 200000,
-  'openai:o4-mini': 200000,
-  'anthropic:claude-opus-4-6': 200000,
-  'anthropic:claude-sonnet-4-5': 200000,
-  'anthropic:claude-haiku-4-5': 200000,
-  'zai:glm-4.6': 200000,
-  'zai:glm-5': 200000,
-  'zai:glm-5.3': 200000,
-}
-
 const NAME_RE = /^[A-Za-z0-9_-]+$/
+
+// Every configured key, for redacting error and status text.
+export function secretsOf(cfg: Config): string[] {
+  return [...Object.values(cfg.keys), ...[...cfg.custom.values()].map(c => c.key)].filter((k): k is string => !!k)
+}
 
 export function missingKeyMessage(provider: KeyedProvider): string {
   const s = KEY_SOURCES[provider]
@@ -102,10 +90,16 @@ export async function loadConfig($: Env, options: Options): Promise<Config> {
       warnings.push(`customEndpoints entry ${i + 1} skipped: expected name=http(s)://url`)
       return
     }
+    // Credentials in the URL would reach error text (and the transcript).
+    if (/^https?:\/\/[^\s/]*@/.test(url)) {
+      warnings.push(`customEndpoints entry ${i + 1} skipped: credentials in the URL are not allowed; put the key in env ROUTER_CUSTOM_API_KEYS`)
+      return
+    }
     custom.set(name, { url, key: customKeys.get(name) })
   })
 
-  const contextWindows = new Map<string, number>(Object.entries(BUILTIN_WINDOWS))
+  // Exact-id entries; the built-in windows are in limits.ts.
+  const contextWindows = new Map<string, number>()
   list(options.contextWindows).forEach((raw, i) => {
     const entry = raw.trim()
     const eq = entry.lastIndexOf('=')

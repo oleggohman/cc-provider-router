@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { parseModel } from './route.ts'
+import { malformedPrefix, parseModel } from './route.ts'
 
 describe('parseModel', () => {
   test('no prefix is not routed', async () => {
@@ -51,5 +51,10 @@ describe('parseModel', () => {
 
   test('unknown prefix is not routed', async () => {
     expect(parseModel('foo:bar')).toBe(null)
+  })
+
+  test('a known prefix with a bad remainder is malformed (a clear error, never the engine)', async () => {
+    for (const id of ['openai:', 'anthropic:', 'zai:', 'custom:', 'custom:gw', 'custom:gw:', 'custom::m']) expect(malformedPrefix(id)).toBe(id.slice(0, id.indexOf(':')))
+    for (const id of ['claude-haiku-4-5', 'foo:bar', 'openai:gpt-5', 'custom:gw:m', '']) expect(malformedPrefix(id)).toBe(undefined)
   })
 })

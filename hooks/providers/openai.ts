@@ -21,25 +21,23 @@ export const OPENAI_BASE = 'https://api.openai.com/v1'
 export type OpenAITarget = { label: string; baseUrl: string; key: string | undefined; reasoning: boolean }
 
 // OpenAI models that take `reasoning_effort` (and reject custom sampling).
+// The `-chat` variants of gpt-5 are not reasoning models.
 export function isReasoningModel(model: string): boolean {
-  return /^(o\d|gpt-5)/.test(model)
+  return /^(o\d|gpt-5)/.test(model) && !/-chat\b/.test(model)
 }
 
 // The endpoint for an `openai:` or `custom:<name>:` route, or why there is
 // none (missing key, unknown endpoint name). Custom endpoints never get
 // `reasoning_effort`: whether a server accepts it is unknown.
-export function targetFor(route: Route, cfg: Config): { ok: true; target: OpenAITarget } | { ok: false; message: string } {
+export function targetFor(route: Extract<Route, { provider: 'openai' | 'custom' }>, cfg: Config): { ok: true; target: OpenAITarget } | { ok: false; message: string } {
   if (route.provider === 'openai') {
     const key = cfg.keys.openai
     if (!key) return { ok: false, message: missingKeyMessage('openai') }
     return { ok: true, target: { label: 'openai', baseUrl: OPENAI_BASE, key, reasoning: isReasoningModel(route.model) } }
   }
-  if (route.provider === 'custom') {
-    const ep = cfg.custom.get(route.name)
-    if (!ep) return { ok: false, message: `unknown custom endpoint "${route.name}": add ${route.name}=<url> to the /config field customEndpoints` }
-    return { ok: true, target: { label: `custom:${route.name}`, baseUrl: ep.url, key: ep.key, reasoning: false } }
-  }
-  return { ok: false, message: `${route.provider} is not an OpenAI-compatible provider` }
+  const ep = cfg.custom.get(route.name)
+  if (!ep) return { ok: false, message: `unknown custom endpoint "${route.name}": add ${route.name}=<url> to the /config field customEndpoints` }
+  return { ok: true, target: { label: `custom:${route.name}`, baseUrl: ep.url, key: ep.key, reasoning: false } }
 }
 
 // The error message of a 200 body that is an error object, if it is one.

@@ -3,9 +3,11 @@
 // failure stops with `refusal`; a context-length error stops with
 // `model_context_window_exceeded`. Key material never appears in the text.
 
+import type { StopReason as AnyStop } from './chunks.ts'
+
 export const PREFIX = '[provider-router]'
 
-export type StopReason = 'refusal' | 'model_context_window_exceeded'
+export type StopReason = Extract<AnyStop, 'refusal' | 'model_context_window_exceeded'>
 
 export type ErrorReply = { text: string; stopReason: StopReason }
 
@@ -74,9 +76,11 @@ export function localError(provider: string, message: string, secrets: readonly 
 
 const ZERO = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
-// The step's chunks and result for an error reply.
-export function* errorChunks(e: { turnId: string; index: number }, r: ErrorReply): Generator<any, any, unknown> {
+// The step's chunks and result for an error reply (zero usage, naming the
+// step's model as TurnUsage requires).
+export function* errorChunks(e: { turnId: string; index: number; model: string }, r: ErrorReply): Generator<any, any, unknown> {
+  const usage = { ...ZERO, model: e.model }
   yield { kind: 'text', index: 0, text: r.text }
-  yield { kind: 'stop', stopReason: r.stopReason, usage: ZERO }
-  return { turnId: e.turnId, index: e.index, answer: r.text, toolUses: [], stopReason: r.stopReason, usage: ZERO }
+  yield { kind: 'stop', stopReason: r.stopReason, usage }
+  return { turnId: e.turnId, index: e.index, answer: r.text, toolUses: [], stopReason: r.stopReason, usage }
 }

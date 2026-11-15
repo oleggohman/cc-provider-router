@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { cfg, drain, sleeper, provider, ZERO } from '../tests/harness.ts'
 import { routedStep } from './register.ts'
 import { resetShadow, shadowFetch } from './shadow.ts'
-import { createThreads, normalizeBody, resolveThread } from './thread.ts'
+import { dropBase, normalizeBody, resolveThread, type ThreadState } from './thread.ts'
 
 // Engine request shapes seen live (Claude Code 2.1.323, message threads):
 // the first request of a loop is a `thread: create` with everything; later
@@ -80,6 +80,52 @@ describe('resolveThread', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.message).toContain('/clear')
   })
+
+  test('a continue with no tools, empty tools or only the placeholder keeps the stored tools', () => {
+    const state = { system: SYS, tools: [BASH, LATE], base: [] as any[] }
+    for (const tools of [undefined, [], [PLACEHOLDER]]) {
+      const r = resolveThread({ ...continueBody, tools }, state)
+      expect(r.ok && r.body.tools).toEqual([BASH, LATE])
+    }
+  })
+
+  test('no conversation known: rebuilt from the session history up to its last assistant turn', () => {
+    const history = [createBody.messages[0], { role: 'assistant', content: REPLY }, ...continueBody.messages]
+    // The loop's own system/tools kept (its conversation was dropped).
+    const kept = resolveThread(continueBody, { system: SYS, tools: [BASH], base: undefined }, { history })
+    expect(kept.ok).toBe(true)
+    if (kept.ok) {
+      expect(kept.body.messages).toEqual([createBody.messages[0], { role: 'assistant', content: REPLY }, ...continueBody.messages])
+      expect(kept.body.system).toEqual(SYS)
+      expect(kept.body.tools).toEqual([BASH])
+    }
+    // A loop never seen (an engine fork): system/tools from the fallback loop.
+    const fork = resolveThread(continueBody, undefined, { history, fallback: { system: SYS, tools: [BASH], base: [] } })
+    expect(fork.ok && fork.body.system).toEqual(SYS)
+    // History without any assistant turn: the delta alone.
+    const fresh = resolveThread(continueBody, undefined, { history: [createBody.messages[0]], fallback: { system: SYS, tools: [BASH], base: [] } })
+    expect(fresh.ok && fresh.body.messages).toEqual(continueBody.messages)
+  })
+
+  test('no conversation and no way to rebuild it (no history, or no system prompt known): the clear error', () => {
+    const history = [createBody.messages[0], { role: 'assistant', content: REPLY }]
+    for (const r of [
+      resolveThread(continueBody, { system: SYS, tools: [BASH], base: undefined }),
+      resolveThread(continueBody, undefined, { history }),
+      resolveThread(continueBody, undefined, { history: undefined, fallback: { system: SYS, tools: [BASH], base: [] } }),
+    ]) {
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.message).toContain('/clear')
+    }
+  })
+
+  test('dropBase forgets the conversation and keeps the system prompt and tools', () => {
+    const threads = new Map<string, ThreadState>([['ag-1', { system: SYS, tools: [BASH], base: [createBody.messages[0]] }]])
+    dropBase(threads, 'ag-1')
+    expect(threads.get('ag-1')).toEqual({ system: SYS, tools: [BASH], base: undefined })
+    dropBase(threads, 'nobody')
+    expect(threads.has('nobody')).toBe(false)
+  })
 })
 
 describe('normalizeBody', () => {
@@ -148,6 +194,48 @@ describe('normalizeBody', () => {
     const n = normalizeBody({ messages: [{ role: 'user', content: 'hi' }] })
     expect('tools' in n).toBe(false)
   })
+
+  test('a string system prompt that is only the billing header is dropped', () => {
+    expect('system' in normalizeBody({ system: BILLING.text, messages: [] })).toBe(false)
+    expect(normalizeBody({ system: 'plain', messages: [] }).system).toBe('plain')
+  })
+
+  test('a tool_addition definition replaces a tool of the same name', () => {
+    const newer = { ...BASH, description: 'run v2' }
+    const n = normalizeBody({ tools: [BASH], messages: [{ role: 'system', content: [{ type: 'tool_addition', tool: { type: 'tool_definition', definition: newer } }] }] })
+    expect(n.tools).toEqual([{ name: 'Bash', description: 'run v2', input_schema: { type: 'object' } }])
+  })
+
+  test('a system message with string content becomes user text', () => {
+    const n = normalizeBody({ messages: [{ role: 'system', content: 'note' }] })
+    expect(n.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'note' }] }])
+  })
+
+  test('consecutive assistant messages are merged', () => {
+    const n = normalizeBody({ messages: [{ role: 'user', content: 'go' }, { role: 'assistant', content: 'a' }, { role: 'assistant', content: [{ type: 'text', text: 'b' }] }] })
+    expect(n.messages).toEqual([{ role: 'user', content: 'go' }, { role: 'assistant', content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }])
+  })
+
+  test('cache breakpoints: only the last one in the messages survives, at most 4 in all, inputs untouched', () => {
+    const cc = { type: 'ephemeral' }
+    const tr = (id: string) => ({ role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: id, cache_control: cc }], cache_control: cc }] })
+    const body = {
+      system: [{ type: 'text', text: 's1', cache_control: cc }, { type: 'text', text: 's2', cache_control: cc }],
+      tools: [{ ...BASH, cache_control: cc }, { ...LATE, cache_control: cc }],
+      messages: [tr('a'), { role: 'assistant', content: 'x' }, tr('b'), { role: 'assistant', content: 'y' }, tr('c')],
+    }
+    const before = JSON.stringify(body)
+    const n = normalizeBody(body)
+    const count = (v: unknown) => (JSON.stringify(v).match(/cache_control/g) ?? []).length
+    expect(count(n.messages)).toBe(1)
+    expect(n.messages[4].content[0].cache_control).toEqual(cc)
+    expect(count(n.messages[4].content[0].content)).toBe(0)
+    expect(count(n.system) + count(n.tools) + count(n.messages)).toBe(4)
+    // The later breakpoints win: the tools' first one goes.
+    expect(count(n.system)).toBe(2)
+    expect('cache_control' in n.tools[0]).toBe(false)
+    expect(JSON.stringify(body)).toBe(before)
+  })
 })
 
 // An engine stand-in that sends one given body per step through shadowFetch.
@@ -179,7 +267,7 @@ describe('routed steps across a thread', () => {
     const eng = threadEngine([createBody, continueBody])
     const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const threads = createThreads()
+    const threads = new Map<string, ThreadState>()
     await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     const second = await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     expect(second.result.answer).toBe('SMOKE')
@@ -199,10 +287,11 @@ describe('routed steps across a thread', () => {
     const eng = threadEngine([createBody, continueBody])
     const p = provider([{ status: 200, text: toolReply }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const threads = createThreads()
+    const threads = new Map<string, ThreadState>()
     await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     const sub = await drain(routedStep(e(0, { agentId: 'ag-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     expect(sub.result.answer).toContain('[provider-router]')
+    expect(sub.result.answer).toContain('/clear')
     expect(p.calls.length).toBe(1)
   })
 
@@ -211,7 +300,7 @@ describe('routed steps across a thread', () => {
     const eng = threadEngine([createBody, continueBody])
     const p = provider([{ status: 500, text: '{}' }, { status: 200, text: textReply }])
     const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
-    const threads = createThreads()
+    const threads = new Map<string, ThreadState>()
     const first = await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     const sent = JSON.parse(p.calls[1]!.init.body)
@@ -239,7 +328,7 @@ describe('routed steps across a thread', () => {
       }
       return p.fetch(url, init)
     }
-    const threads = createThreads()
+    const threads = new Map<string, ThreadState>()
     const live = new AbortController().signal
     await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: live }, threads))
     const cancelled = await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal: esc.signal }, threads))
@@ -262,12 +351,68 @@ describe('routed steps across a thread', () => {
     const fetch = async (url: string, init: any) => (++n === 1 ? new Promise<never>(() => {}) : p.fetch(url, init))
     // A sleep that fires at once: the timer wins the first call.
     const fire = async () => {}
-    const threads = createThreads()
+    const threads = new Map<string, ThreadState>()
     const signal = new AbortController().signal
     const first = await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: fire, signal, timeoutMs: 5 }, threads))
     expect(first.result.answer).toContain('timed out')
     await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch, sleep: sleeper().sleep, signal }, threads))
     const sent = JSON.parse(p.calls[0]!.init.body)
     expect(sent.messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: first.result.answer }] })
+  })
+
+  test('a fork continuing the main thread is rebuilt from its session history with the main system prompt and tools', async () => {
+    resetShadow()
+    const eng = threadEngine([createBody, continueBody])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const threads = new Map<string, ThreadState>()
+    const signal = new AbortController().signal
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    // The engine's API-form history, with its first-party forms (normalized later).
+    const history = [...createBody.messages, { role: 'assistant', content: REPLY }, ...continueBody.messages]
+    const asked: string[] = []
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => (asked.push('h'), history) }
+    const fork = await drain(routedStep(e(1, { agentId: 'fork-1' }), eng.next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(fork.result.answer).toBe('SMOKE')
+    expect(asked.length).toBe(1)
+    const sent = JSON.parse(p.calls[1]!.init.body)
+    expect(sent.messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(JSON.stringify(sent.system)).toContain('You are an agent.')
+    expect(sent.tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+    expect(eng.network.length).toBe(0)
+  })
+
+  test('an early error with no captured request drops the conversation; the next continue is rebuilt from history', async () => {
+    resetShadow()
+    // Step 1's shadow is never captured (the engine sends nothing).
+    let i = 0
+    const inner = threadEngine([createBody, continueBody])
+    const next = async function* (ev: any): AsyncGenerator<any, any> {
+      if (i++ === 1) return { turnId: ev.turnId, index: ev.index, answer: '', toolUses: [] }
+      return yield* inner.next(ev)
+    }
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const threads = new Map<string, ThreadState>()
+    const signal = new AbortController().signal
+    await drain(routedStep(e(0), next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    const failed = await drain(routedStep(e(1), next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    expect(failed.result.answer).toContain('not captured')
+    expect(threads.get('main')!.base).toBe(undefined)
+    // Without history: the clear error, no provider call.
+    const lost = await drain(routedStep(e(2), next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    expect(lost.result.answer).toContain('/clear')
+    expect(p.calls.length).toBe(1)
+    // With history (what the engine holds, incl. the error turn): rebuilt.
+    resetShadow()
+    i = 1
+    const history = [createBody.messages[0], { role: 'assistant', content: REPLY }, ...continueBody.messages, { role: 'assistant', content: [{ type: 'text', text: failed.result.answer }] }]
+    const inner2 = threadEngine([continueBody])
+    const next2 = async function* (ev: any): AsyncGenerator<any, any> {
+      return yield* inner2.next(ev)
+    }
+    const ok = await drain(routedStep(e(3), next2, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => history }, threads))
+    expect(ok.result.answer).toBe('SMOKE')
+    const sent = JSON.parse(p.calls[1]!.init.body)
+    expect(sent.messages.length).toBe(5)
+    expect(sent.messages[3].content[0].text).toContain('not captured')
   })
 })
