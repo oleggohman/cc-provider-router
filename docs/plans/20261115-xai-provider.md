@@ -86,11 +86,11 @@ One task, because adding `xai` to `SimpleProvider` makes `routedStep` hand xAI r
 **Files:**
 - Modify: `README.md`, `scripts/smoke.sh`, `CLAUDE.md`
 
-- [ ] README: the keys table (`XAI_API_KEY` / `xaiApiKey`); an `xai:grok-4.7` example; every list of accepted prefixes and the adapter-dispatch description (`xai:` → Chat Completions, translated); the limits list with the 32 768 output assumption; the effort sentence (today "only OpenAI reasoning models") extended with xAI's mapping (`xhigh`/`max` → `xhigh`) and the dropped `stop` sequences on xAI reasoning models; the smoke-provider list; a note that xAI's Anthropic-compatible endpoint is deprecated and its Chat Completions is filed as legacy (a Responses adapter is a possible follow-up); and the verified-status row "xAI (`xai:`): unit-tested only; not live-verified at release"
-- [ ] `scripts/smoke.sh`: an `xai xai:$XAI_MODEL` provider case when `XAI_API_KEY` is set (`SMOKE_XAI_MODEL`, default `grok-4.7`), skipped otherwise; header comment lists it
-- [ ] `CLAUDE.md`: the smoke key-variable list gains `XAI_API_KEY`; the "Adding a provider" list mentions the `OpenAITarget` / `ChatOptions` fields an OpenAI-compatible provider may need
-- [ ] bump `package.json` and `.claude-plugin/plugin.json` version to `0.1.3`
-- [ ] run tests, typecheck, validate - all pass
+- [x] README: the keys table (`XAI_API_KEY` / `xaiApiKey`); an `xai:grok-4.7` example; every list of accepted prefixes and the adapter-dispatch description (`xai:` → Chat Completions, translated); the limits list with the 32 768 output assumption; the effort sentence (today "only OpenAI reasoning models") extended with xAI's mapping (`xhigh`/`max` → `xhigh`) and the dropped `stop` sequences on xAI reasoning models; the smoke-provider list; a note that xAI's Anthropic-compatible endpoint is deprecated and its Chat Completions is filed as legacy (a Responses adapter is a possible follow-up); and the verified-status row "xAI (`xai:`): unit-tested only; not live-verified at release"
+- [x] `scripts/smoke.sh`: an `xai xai:$XAI_MODEL` provider case when `XAI_API_KEY` is set (`SMOKE_XAI_MODEL`, default `grok-4.7`), skipped otherwise; header comment lists it
+- [x] `CLAUDE.md`: the smoke key-variable list gains `XAI_API_KEY`; the "Adding a provider" list mentions the `OpenAITarget` / `ChatOptions` fields an OpenAI-compatible provider may need
+- [x] bump `package.json` and `.claude-plugin/plugin.json` version to `0.1.3`
+- [x] run tests, typecheck, validate - all pass
 
 ### Task 4: Verify
 
