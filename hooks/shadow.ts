@@ -17,8 +17,9 @@
 // - If the `http.fetch` hook itself fails, its `.catch` (shadowFetchFailed)
 //   refuses anything that could be a shadow.
 // - Circuit breaker: a shadow step that ends uncaptured (no Esc) while the
-//   hook saw no engine request at all means engine requests bypass this mod;
-//   every later shadow step is then refused before `next`, until reload.
+//   hook saw no engine request at all may mean engine requests bypass this
+//   mod; every later shadow step is then refused before `next`, until the
+//   hook sees an engine request (or the module reloads).
 // - The stub reports zero usage; its chunks are drained and never yielded.
 
 import { ZERO_USAGE } from './chunks.ts'
@@ -39,13 +40,16 @@ const counters = { shadowLeaks: 0, shadowRefused: 0 }
 
 // Circuit breaker. `engineSeen` counts the engine requests the http.fetch
 // hook saw. A shadow step that ends uncaptured, without Esc, while the hook
-// saw no engine request at all, means the engine's requests bypass this mod
-// (where an organization's guard loads, only its own mods see them): the
-// shadow request went out unseen. `blind` then stays set until the module
-// reloads, and every later shadow step is refused before `next` is called.
+// saw no engine request at all, may mean the engine's requests bypass this
+// mod (where an organization's guard loads, only its own mods see them): the
+// shadow request went out unseen. A step that sent nothing (a hook beneath
+// answered it, or the engine failed before sending) looks the same. `blind`
+// then refuses every later shadow step before `next` is called, until the
+// hook sees an engine request (that disproves blindness; under such a guard
+// none is ever seen) or the module reloads.
 const breaker = { engineSeen: 0, blind: false }
 
-const BLIND = "routing is off: this plugin cannot see the engine's requests (an organization guard may hide them), so none is sent; restart Claude Code to retry"
+const BLIND = "routing is off: this plugin saw no engine request for a routed step (an organization guard may hide Claude Code's requests), so none is sent; it resumes once the plugin sees a Claude Code request, or restart Claude Code"
 
 export function shadowStats(): { shadowLeaks: number; shadowRefused: number; pending: number; blind: boolean } {
   return { ...counters, pending: pending.size, blind: breaker.blind }
@@ -161,6 +165,7 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
     return next(e)
   }
   breaker.engineSeen++
+  breaker.blind = false
   const key = loopKey(e.init?.headers)
   const p = pending.get(key)
   if (p) {
@@ -182,7 +187,10 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
 // a shadow is refused: any request while a shadow is pending, or one naming
 // the shadow model anywhere in its URL or text body.
 export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & { readonly called: boolean }): R | { value: ShadowResponse } {
-  if (isEngineRequest(e)) breaker.engineSeen++
+  if (isEngineRequest(e)) {
+    breaker.engineSeen++
+    breaker.blind = false
+  }
   if (next.called) return next(e)
   const body = e.init?.body
   if (pending.size > 0 || e.url.includes(SHADOW_MODEL) || (typeof body === 'string' && body.includes(SHADOW_MODEL))) return { value: refuse() }
@@ -195,7 +203,8 @@ export type ShadowStepEvent = { agentId?: string; messageCount: number; model: s
 // Throws ShadowError when no request was captured, the loop already has a
 // pending shadow, or the breaker is set (then `next` is never called). An
 // uncaptured step that ends without Esc (`signal`) while the hook saw no
-// engine request sets the breaker. The stub's chunks are drained here and
+// engine request sets the breaker; an engine request seen later clears it.
+// The stub's chunks are drained here and
 // never yielded.
 export async function shadowStep<E extends ShadowStepEvent>(e: E, next: (e: E) => AsyncIterable<unknown>, signal?: AbortSignal): Promise<any> {
   if (breaker.blind) throw new ShadowError(BLIND)

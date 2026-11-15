@@ -57,7 +57,7 @@ export function statusText(cfg: Config, stats: ShadowCounters): string {
   }
   if (cfg.custom.size === 0) lines.push('  custom: none (add name=url to the /config field customEndpoints)')
   lines.push(`shadow: shadowLeaks ${stats.shadowLeaks}, shadowRefused ${stats.shadowRefused}`)
-  if (stats.blind) lines.push("routing is off: this plugin cannot see the engine's requests (an organization guard may hide them); restart Claude Code to retry")
+  if (stats.blind) lines.push("routing is off: this plugin saw no engine request for a routed step (an organization guard may hide Claude Code's requests); it resumes once the plugin sees a Claude Code request, or restart Claude Code")
   for (const w of cfg.warnings) lines.push(`warning: ${w}`)
   lines.push('Run /providers models to list each provider\'s models.')
   return redact(lines.join('\n'), secretsOf(cfg))

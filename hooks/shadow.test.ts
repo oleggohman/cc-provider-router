@@ -534,6 +534,51 @@ describe('blind capture: the http.fetch hook never sees the engine request', () 
     expect(net.calls.length).toBe(0)
   })
 
+  test('a step that sends no request turns routing off; an engine request the hook sees turns it back on', async () => {
+    resetShadow()
+    const net = network()
+    // A hook beneath this mod answers the step itself: no request at all.
+    const silent = async function* (e: any): AsyncGenerator<any, any> {
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [] }
+    }
+    const p = counting()
+    const first = await drain(routedStep(step(), silent, ROUTE, CFG, p.io, new Map()))
+    expect(first.result.answer).toContain('not captured')
+    expect(first.result.answer).toContain('saw no engine request')
+    expect(shadowStats().blind).toBe(true)
+    // Still off: refused before next, nothing sent.
+    let calls = 0
+    const counted = async function* (): AsyncGenerator<any, any> {
+      calls++
+    }
+    const off = await drain(routedStep(step(), counted, ROUTE, CFG, p.io, new Map()))
+    expect(off.result.answer).toContain('routing is off')
+    expect(calls).toBe(0)
+    // The mod's own requests (no engine markers) prove nothing.
+    await send(net, { engine: false, model: 'gpt-5' })
+    expect(shadowStats().blind).toBe(true)
+    // An unprefixed engine request seen by the hook: not blind after all.
+    expect((await send(net, { model: 'claude-sonnet-4-5', messages: 2 })).text).toBe('{"network":true}')
+    expect(shadowStats().blind).toBe(false)
+    const eng = engine(net)
+    const back = await drain(routedStep(step(), eng.next, ROUTE, CFG, p.io, new Map()))
+    expect(back.result.answer).not.toContain('routing is off')
+    expect(eng.seen.length).toBe(1)
+    expect(eng.answers[0].status).toBe(200)
+    expect(p.calls.length).toBe(1)
+    expect(net.calls.length).toBe(2) // the mod's own request and the unprefixed one; no shadow
+    expect(shadowStats().shadowLeaks).toBe(0)
+  })
+
+  test('an engine request seen only by the .catch (shadowFetchFailed) also turns routing back on', async () => {
+    resetShadow()
+    const net = network()
+    await drain(routedStep(step(), blindEngine(net).next, ROUTE, CFG, counting().io, new Map()))
+    expect(shadowStats().blind).toBe(true)
+    shadowFetchFailed(fetchEvent({ model: 'claude-sonnet-4-5' }), Object.assign((e: any) => net.next(e), { called: false }))
+    expect(shadowStats().blind).toBe(false)
+  })
+
   test('a shadow the hook saw but refused (not captured) does not turn routing off', async () => {
     resetShadow()
     const net = network()

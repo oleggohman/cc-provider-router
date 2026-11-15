@@ -650,4 +650,39 @@ describe('routed steps across a thread', () => {
     expect(sent.messages.length).toBe(5)
     expect(sent.messages[3].content[0].text).toContain('not captured')
   })
+
+  test('an early error where the engine sends nothing drops the conversation and turns routing off until an engine request is seen', async () => {
+    resetShadow()
+    // Step 1's next answers without any request (a hook beneath answered it).
+    let i = 0
+    let calls = 0
+    const inner = threadEngine([createBody, continueBody])
+    const next = async function* (ev: any): AsyncGenerator<any, any> {
+      calls++
+      if (i++ === 1) return { turnId: ev.turnId, index: ev.index, answer: '', toolUses: [] }
+      return yield* inner.next(ev)
+    }
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const threads = new Map<string, ThreadState>()
+    const io = { fetch: p.fetch, sleep: sleeper().sleep, signal: new AbortController().signal }
+    await drain(routedStep(e(0), next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    const failed = await drain(routedStep(e(1), next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(failed.result.answer).toContain('not captured')
+    expect(failed.result.answer).toContain('routing is off')
+    expect(threads.get('main')!.base).toBe(undefined)
+    // Off: the next step is refused before next, no provider call.
+    const off = await drain(routedStep(e(2), next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(off.result.answer).toContain('routing is off')
+    expect(calls).toBe(2)
+    expect(p.calls.length).toBe(1)
+    // An unprefixed engine request seen by the hook turns routing back on.
+    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers: { 'x-claude-code-session-id': 's1' }, compress: 'gzip', body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] }) } }, () => ({ value: { status: 200, ok: true, headers: {}, text: '' } }))
+    // Without history: the clear error (the conversation was dropped).
+    const lost = await drain(routedStep(e(3), next, route, cfg({ zai: 'k-zai-1' }), io, threads))
+    expect(lost.result.answer).toContain('/clear')
+    expect(lost.result.answer).not.toContain('routing is off')
+    expect(calls).toBe(3)
+    expect(p.calls.length).toBe(1)
+    expect(inner.network.length).toBe(0)
+  })
 })

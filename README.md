@@ -295,8 +295,14 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
   (full conversation, for the non-existent model `provider-router-shadow`)
   goes to Anthropic's API under your session (refused there, not billed), the
   step answers `routing is off ...`, and every later routed step answers the
-  same without sending anything, until Claude Code restarts. `/providers`
-  shows `routing is off` then.
+  same without sending anything. `/providers` shows `routing is off` then.
+  Routing turns back on by itself as soon as the router sees any Claude Code
+  request (a step on a model without a router prefix), which cannot happen
+  under such a guard; otherwise restart Claude Code. A routed step that
+  sends no request at all (another plugin answered it, or Claude Code failed
+  before sending) looks the same to the router and also turns routing off
+  until then; in a session where every step is routed, that lasts until a
+  restart.
 - **Your subscription is never routed** and never pays for a routed call. The
   router does not use your Claude sign-in.
 - **History in memory.** Claude Code sends a conversation as a thread (after
@@ -356,7 +362,7 @@ models use it.
 | `error 429`, or `credit balance is too low` | rate limit, or no credit on the provider account |
 | `unknown custom endpoint "x"` | the name in `custom:<name>:` must match a `customEndpoints` entry |
 | `the conversation so far is not known to the router` | the plugin reloaded mid-conversation (or the history could not be rebuilt): run `/clear` or `/compact` |
-| `routing is off: this plugin cannot see the engine's requests ...` | an organization-managed guard hides Claude Code's requests from this plugin (see Limits); routing cannot work in that setup. Restart Claude Code to retry |
+| `routing is off: this plugin saw no engine request ...` | an organization-managed guard may hide Claude Code's requests from this plugin (see Limits); routing cannot work in that setup. If no guard is involved (another plugin answered a routed step), it turns back on after any step on a model without a router prefix, or restart Claude Code |
 | `malformed model id "..."` | a router prefix with nothing after it (`openai:`, `custom:gw`): use `<prefix>:<model>` or `custom:<name>:<model>` |
 | context-length error in a subagent | the task was too large for the model: lower `autoCompactWindow` or split the task |
 | anything else | `/providers` (status, warnings, counters), `/providers models` (calls each provider), `claude --debug` |
@@ -364,7 +370,7 @@ models use it.
 `/providers` also shows two safety counters, `shadowLeaks` and
 `shadowRefused`. `shadowLeaks` must be 0; if it is not, please open an issue.
 It adds a `routing is off` line when the router has switched itself off
-because it cannot see Claude Code's requests (see Limits).
+because it saw no Claude Code request for a routed step (see Limits).
 
 ## Security
 

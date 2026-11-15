@@ -79,9 +79,16 @@ models.
   for the unknown id, but the content has left the machine). A shadow step
   that ends uncaptured, without Esc, while the hook saw no engine request at
   all sets a module-level flag; every later shadow step is refused before
-  `next` is called, until the module reloads. The first such request cannot
-  be stopped from inside the mod. `/providers` shows `routing is off`. Not
-  reproduced live (no organization guard to test with).
+  `next` is called. The first such request cannot be stopped from inside the
+  mod. `/providers` shows `routing is off`. Not reproduced live (no
+  organization guard to test with);
+- the same signature matches a shadow step that sent no request (a
+  `turn.step` hook beneath answered it without `next`, or the engine failed
+  before sending; the types give no reliable way to tell: `stopReason` is
+  null both then and for a failed request). So the flag heals: any engine
+  request the hook sees (`shadowFetch` or `shadowFetchFailed`) clears it,
+  since under the guard none is ever seen. Residual gap: a session with no
+  unprefixed traffic stays off until the module reloads.
 
 ## Message threads (found in the live smoke tests)
 
