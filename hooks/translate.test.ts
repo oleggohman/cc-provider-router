@@ -231,6 +231,38 @@ describe('Anthropic -> Chat Completions', () => {
   })
 })
 
+describe('Anthropic -> Chat Completions: xAI targets', () => {
+  const XAI_REASONING = { reasoning: true, rejectsStop: true, effortScale: 'xai' as const }
+  const XAI_PLAIN = { reasoning: false, rejectsStop: false, effortScale: 'xai' as const }
+
+  test('reasoning target: no stop even with stop_sequences; no temperature / top_p', async () => {
+    const c = toChat(base({ temperature: 1, top_p: 1, stop_sequences: ['X'] }), { ...XAI_REASONING, effort: 'high' })
+    expect('stop' in c).toBe(false)
+    expect('temperature' in c).toBe(false)
+    expect('top_p' in c).toBe(false)
+    expect(c.reasoning_effort).toBe('high')
+  })
+
+  test('reasoning target: xhigh and max are sent as xhigh; low, medium, high as is; a number or no effort is none', async () => {
+    const r = (effort: any) => toChat(base(), { ...XAI_REASONING, effort }).reasoning_effort
+    expect(r('low')).toBe('low')
+    expect(r('medium')).toBe('medium')
+    expect(r('high')).toBe('high')
+    expect(r('xhigh')).toBe('xhigh')
+    expect(r('max')).toBe('xhigh')
+    expect(r(3)).toBeUndefined()
+    expect(r(undefined)).toBeUndefined()
+  })
+
+  test('non-reasoning target: stop, temperature and top_p kept; no reasoning_effort', async () => {
+    const c = toChat(base({ temperature: 0.2, top_p: 0.9, stop_sequences: ['X'] }), { ...XAI_PLAIN, effort: 'xhigh' })
+    expect(c.stop).toEqual(['X'])
+    expect(c.temperature).toBe(0.2)
+    expect(c.top_p).toBe(0.9)
+    expect('reasoning_effort' in c).toBe(false)
+  })
+})
+
 const reply = (message: any, extra: any = {}) =>
   JSON.stringify({ id: 'chatcmpl-1', object: 'chat.completion', model: 'gpt-5-2025-08-07', choices: [{ index: 0, message: { role: 'assistant', ...message }, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 }, ...extra })
 

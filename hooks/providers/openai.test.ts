@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { OPENAI_BASE, complete, isReasoningModel, targetFor } from './openai.ts'
+import { OPENAI_BASE, XAI_BASE, complete, isReasoningModel, isXaiReasoningModel, targetFor } from './openai.ts'
 import { routedStep } from '../register.ts'
 import { SHADOW_MODEL, resetShadow, shadowStats } from '../shadow.ts'
 import { cfg, drain, engine as sharedEngine, provider, sleeper, step } from '../../tests/harness.ts'
@@ -10,6 +10,7 @@ import { cfg, drain, engine as sharedEngine, provider, sleeper, step } from '../
 
 const KEY = 'sk-proj-test-KEY-0123456789abcdef'
 const GW_KEY = 'gw-secret-key-0123456789abcdef'
+const XAI_KEY = 'xai-test-KEY-0123456789abcdef'
 
 const REQ = {
   model: 'gpt-5',
@@ -134,6 +135,35 @@ describe('openai adapter', () => {
     expect(!b.ok && b.error.text).toContain('[provider-router] openai error: unreadable reply')
   })
 
+  test('openai reasoning: stop kept, xhigh mapped to high, body byte-for-byte as before', async () => {
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const req = { ...REQ, temperature: 1, top_p: 1, stop_sequences: ['END'] }
+    await complete(p.fetch, req, 'xhigh', OPENAI_T, [KEY])
+    expect(p.calls[0]!.init.body).toBe(
+      '{"model":"gpt-5","messages":[{"role":"system","content":"SYS"},{"role":"user","content":"hi"}],"max_completion_tokens":128000,"tools":[{"type":"function","function":{"name":"Bash","description":"run","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}],"stop":["END"],"reasoning_effort":"high"}',
+    )
+  })
+
+  test('openai non-reasoning: stop, temperature and top_p kept; no reasoning_effort; body byte-for-byte as before', async () => {
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const t = { label: 'openai', baseUrl: OPENAI_BASE, key: KEY, reasoning: false }
+    const req = { ...REQ, model: 'gpt-4o', temperature: 0.2, top_p: 0.9, stop_sequences: ['END'] }
+    await complete(p.fetch, req, 'high', t, [KEY])
+    expect(p.calls[0]!.init.body).toBe(
+      '{"model":"gpt-4o","messages":[{"role":"system","content":"SYS"},{"role":"user","content":"hi"}],"max_completion_tokens":128000,"tools":[{"type":"function","function":{"name":"Bash","description":"run","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}],"stop":["END"],"temperature":0.2,"top_p":0.9}',
+    )
+  })
+
+  test('custom endpoint serving a Grok model id: stop and sampling kept, no xhigh, no reasoning_effort', async () => {
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const t = { label: 'custom:xai', baseUrl: 'https://api.x.ai/v1', key: XAI_KEY, reasoning: false }
+    const req = { ...REQ, model: 'grok-4.7', temperature: 0.5, top_p: 0.8, stop_sequences: ['END'] }
+    await complete(p.fetch, req, 'xhigh', t, [XAI_KEY])
+    expect(p.calls[0]!.init.body).toBe(
+      '{"model":"grok-4.7","messages":[{"role":"system","content":"SYS"},{"role":"user","content":"hi"}],"max_completion_tokens":128000,"tools":[{"type":"function","function":{"name":"Bash","description":"run","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}],"stop":["END"],"temperature":0.5,"top_p":0.8}',
+    )
+  })
+
   test('custom endpoint with key: its own URL and Bearer key; no reasoning_effort', async () => {
     const p = provider([{ status: 200, text: OK_TEXT }])
     const r = await complete(p.fetch, { ...REQ, model: 'org/llama:v1' }, 'high', { label: 'custom:gw', baseUrl: 'http://gateway.example.internal:4000/v1', key: GW_KEY, reasoning: false }, [GW_KEY])
@@ -186,6 +216,34 @@ describe('targetFor', () => {
     const u = targetFor({ provider: 'custom', name: 'nope', model: 'm' }, cfg)
     expect(!u.ok && u.message).toContain('nope')
     expect(!u.ok && u.message).toContain('customEndpoints')
+  })
+
+  test('xai: xAI base URL and key; reasoning, rejectsStop and effortScale set', async () => {
+    expect(targetFor({ provider: 'xai', model: 'grok-4.7' }, CFG({ xai: XAI_KEY }))).toEqual({
+      ok: true,
+      target: { label: 'xai', baseUrl: XAI_BASE, key: XAI_KEY, reasoning: true, rejectsStop: true, effortScale: 'xai' },
+    })
+    expect(XAI_BASE).toBe('https://api.x.ai/v1')
+  })
+
+  test('xai reasoning follows the model id; a non-reasoning model drops rejectsStop', async () => {
+    const t = (model: string) => targetFor({ provider: 'xai', model }, CFG({ xai: XAI_KEY }))
+    expect(t('grok-4.7-latest')).toMatchObject({ ok: true, target: { reasoning: true, rejectsStop: true } })
+    expect(t('grok-4.20-0309-non-reasoning')).toMatchObject({ ok: true, target: { reasoning: false, rejectsStop: false, effortScale: 'xai' } })
+    expect(t('grok-4.20-non-reasoning')).toMatchObject({ ok: true, target: { reasoning: false, rejectsStop: false } })
+    expect(t('grok-4.20-non-reasoning-latest')).toMatchObject({ ok: true, target: { reasoning: false, rejectsStop: false } })
+  })
+
+  test('xai without key: message names XAI_API_KEY and xaiApiKey', async () => {
+    const t = targetFor({ provider: 'xai', model: 'grok-4.7' }, CFG({}))
+    expect(t.ok).toBe(false)
+    expect(!t.ok && t.message).toContain('XAI_API_KEY')
+    expect(!t.ok && t.message).toContain('xaiApiKey')
+  })
+
+  test('isXaiReasoningModel: every Grok id reasons except the non-reasoning variants', async () => {
+    for (const m of ['grok-4.7', 'grok-4.7-latest', 'grok-4.20-0309-reasoning', 'grok-build-0.1', 'grok-4.20-multi-agent-0309']) expect(isXaiReasoningModel(m)).toBe(true)
+    for (const m of ['grok-4.20-0309-non-reasoning', 'grok-4.20-non-reasoning', 'grok-4.20-non-reasoning-latest']) expect(isXaiReasoningModel(m)).toBe(false)
   })
 
   test('reasoning models', async () => {
@@ -273,5 +331,42 @@ describe('routed step: openai and custom', () => {
     expect(eng.seen.length).toBe(0)
     expect(p.calls.length).toBe(0)
     expect(result.answer).toContain('OPENAI_API_KEY')
+  })
+})
+
+describe('routed step: xai', () => {
+  test('xai: POST to the xAI chat completions URL with the Bearer key; reply streamed as chunks; no shadow on the network', async () => {
+    resetShadow()
+    const eng = engine()
+    const p = provider([{ status: 200, text: TOOL_TEXT }])
+    const { chunks, result } = await drain(routedStep(step('xai:grok-4.7'), eng.next, { provider: 'xai', model: 'grok-4.7' }, CFG({ xai: XAI_KEY }), io(p.fetch), new Map()))
+    expect(eng.seen[0].model).toBe(SHADOW_MODEL)
+    expect(eng.network.length).toBe(0)
+    expect(p.calls.length).toBe(1)
+    expect(p.calls[0]!.url).toBe('https://api.x.ai/v1/chat/completions')
+    expect(p.calls[0]!.init.headers.authorization).toBe(`Bearer ${XAI_KEY}`)
+    const sent = JSON.parse(p.calls[0]!.init.body)
+    expect(sent.model).toBe('grok-4.7')
+    expect(sent.reasoning_effort).toBe('high')
+    expect(sent.stop).toBeUndefined()
+    expect(sent.temperature).toBeUndefined()
+    // The engine was answered with the reply as SSE; its chunks are the step's.
+    expect(eng.answers[0].text).toContain('"id":"msg_pr_')
+    expect(eng.answers[0].text).not.toContain(XAI_KEY)
+    expect(chunks.map(c => c.kind)).toEqual(['text', 'tool', 'input', 'stop'])
+    expect(result.toolUses).toEqual([{ name: 'Bash', input: { command: 'ls' } }])
+    expect(JSON.stringify({ chunks, result })).not.toContain(XAI_KEY)
+    expect(shadowStats()).toEqual({ shadowLeaks: 0, shadowRefused: 0, pending: 0, blind: false, classifierPassed: 0, classifierRefused: 0 })
+  })
+
+  test('xai missing key: no shadow, no provider call, a local error', async () => {
+    resetShadow()
+    const eng = engine()
+    const p = provider([{ status: 200, text: OK_TEXT }])
+    const { result } = await drain(routedStep(step('xai:grok-4.7'), eng.next, { provider: 'xai', model: 'grok-4.7' }, CFG({}), io(p.fetch), new Map()))
+    expect(eng.seen.length).toBe(0)
+    expect(p.calls.length).toBe(0)
+    expect(result.answer).toContain('XAI_API_KEY')
+    expect(result.stopReason).toBe('refusal')
   })
 })

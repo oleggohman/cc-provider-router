@@ -1587,7 +1587,7 @@ describe('the router-prefix check agrees with route.ts', () => {
     resetShadow()
     const net = network()
     const prefixes = [...ID_FORMS.matchAll(/\b([a-z]+):</g)].map(m => m[1]!)
-    expect(prefixes.sort()).toEqual(['anthropic', 'custom', 'openai', 'zai'])
+    expect(prefixes.sort()).toEqual(['anthropic', 'custom', 'openai', 'xai', 'zai'])
     for (const p of prefixes) {
       expect(classifyModel(`${p}:a:b`).kind).not.toBe('unprefixed')
       expect(refused(await fetchVia(net, engineReq({ ...CONVERSATION, model: `${p}:a:b` })))).toBe(true)

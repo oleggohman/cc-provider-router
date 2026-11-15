@@ -18,7 +18,7 @@ import sys
 URL = 'https://api.anthropic.com/v1/messages?beta=true'
 BETA = re.compile(r'^auto-mode-classifier-\d{4}-\d{2}-\d{2}$')
 ALLOWED = {'max_tokens', 'messages', 'metadata', 'model', 'stop_sequences', 'system', 'thinking'}
-PREFIX = re.compile(r'^(anthropic|openai|zai|custom)(:|$)')
+PREFIX = re.compile(r'^(anthropic|openai|zai|xai|custom)(:|$)')
 SHADOW = 'provider-router-shadow'
 CLASSIFIER_SYSTEM = 'You are a security monitor for autonomous AI coding agents.'
 

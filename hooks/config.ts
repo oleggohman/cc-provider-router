@@ -31,6 +31,7 @@ export const KEY_SOURCES: Record<KeyedProvider, { env: string; field: string }> 
   openai: { env: 'OPENAI_API_KEY', field: 'openaiApiKey' },
   anthropic: { env: 'ROUTER_ANTHROPIC_API_KEY', field: 'anthropicApiKey' },
   zai: { env: 'ZAI_API_KEY', field: 'zaiApiKey' },
+  xai: { env: 'XAI_API_KEY', field: 'xaiApiKey' },
 }
 
 const NAME_RE = /^[A-Za-z0-9_-]+$/
@@ -80,6 +81,7 @@ export async function loadConfig($: Env, options: Options): Promise<Config> {
     openai: await $.env.get('OPENAI_API_KEY'),
     anthropic: await $.env.get('ROUTER_ANTHROPIC_API_KEY'),
     zai: await $.env.get('ZAI_API_KEY'),
+    xai: await $.env.get('XAI_API_KEY'),
   }
   const keys: Config['keys'] = {}
   for (const p of Object.keys(KEY_SOURCES) as KeyedProvider[]) {

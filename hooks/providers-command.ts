@@ -7,7 +7,7 @@ import { raceCall, type FetchResponse, type Sleep } from './call.ts'
 import { KEY_SOURCES, secretsOf, type Config, type KeyedProvider } from './config.ts'
 import { localError, providerError, redact } from './errors.ts'
 import { ANTHROPIC_ROWS, ANTHROPIC_VERSION, authHeader, type AnthropicRow } from './providers/anthropic.ts'
-import { OPENAI_BASE } from './providers/openai.ts'
+import { OPENAI_BASE, XAI_BASE } from './providers/openai.ts'
 import { customLabel } from './route.ts'
 import { transportLine, type TransportKind } from './transport.ts'
 
@@ -36,6 +36,7 @@ function rows(cfg: Config): Row[] {
     { label: 'anthropic', baseUrl: ANTHROPIC_ROWS.anthropic.baseUrl, key: cfg.keys.anthropic, keyed: 'anthropic', anthropic: ANTHROPIC_ROWS.anthropic },
     { label: 'openai', baseUrl: OPENAI_BASE, key: cfg.keys.openai, keyed: 'openai' },
     { label: 'zai', baseUrl: ANTHROPIC_ROWS.zai.baseUrl, key: cfg.keys.zai, keyed: 'zai', anthropic: ANTHROPIC_ROWS.zai },
+    { label: 'xai', baseUrl: XAI_BASE, key: cfg.keys.xai, keyed: 'xai' },
   ]
   for (const [name, ep] of cfg.custom) out.push({ label: customLabel(name), baseUrl: ep.url, key: ep.key })
   return out

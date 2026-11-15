@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { classifyModel, parseModel } from './route.ts'
+import { ID_FORMS, classifyModel, parseModel } from './route.ts'
 
 describe('parseModel', () => {
   test('no prefix is not routed', async () => {
@@ -17,6 +17,30 @@ describe('parseModel', () => {
 
   test('zai: prefix', async () => {
     expect(parseModel('zai:glm-5.3')).toEqual({ provider: 'zai', model: 'glm-5.3' })
+  })
+
+  test('xai: prefix', async () => {
+    expect(parseModel('xai:grok-4.7')).toEqual({ provider: 'xai', model: 'grok-4.7' })
+  })
+
+  test('xai: ids may contain / and : after the prefix', async () => {
+    expect(parseModel('xai:org/grok:beta')).toEqual({ provider: 'xai', model: 'org/grok:beta' })
+  })
+
+  test('a model id that merely contains xai without the prefix is not routed', async () => {
+    expect(parseModel('grok-4.7')).toBe(null)
+    expect(parseModel('xai-grok-4.7')).toBe(null)
+    expect(parseModel('my-xai:model')).toBe(null)
+    expect(classifyModel('grok-4.7')).toEqual({ kind: 'unprefixed' })
+  })
+
+  test('xai: alone is malformed (a local error, never the engine)', async () => {
+    expect(parseModel('xai:')).toBe(null)
+    expect(classifyModel('xai:')).toEqual({ kind: 'malformed', prefix: 'xai' })
+  })
+
+  test('ID_FORMS names xai:<id>', async () => {
+    expect(ID_FORMS).toContain('xai:<id>')
   })
 
   test('zai: with an empty id is not routed', async () => {
@@ -54,8 +78,8 @@ describe('parseModel', () => {
   })
 
   test('a known prefix with a bad remainder is malformed (a clear error, never the engine)', async () => {
-    for (const id of ['openai:', 'anthropic:', 'zai:', 'custom:', 'custom:gw', 'custom:gw:', 'custom::m']) expect(classifyModel(id)).toEqual({ kind: 'malformed', prefix: id.slice(0, id.indexOf(':')) })
+    for (const id of ['openai:', 'anthropic:', 'zai:', 'xai:', 'custom:', 'custom:gw', 'custom:gw:', 'custom::m']) expect(classifyModel(id)).toEqual({ kind: 'malformed', prefix: id.slice(0, id.indexOf(':')) })
     for (const id of ['claude-haiku-4-5', 'foo:bar', '']) expect(classifyModel(id)).toEqual({ kind: 'unprefixed' })
-    for (const id of ['openai:gpt-5', 'custom:gw:m']) expect(classifyModel(id)).toEqual({ kind: 'route', route: parseModel(id)! })
+    for (const id of ['openai:gpt-5', 'xai:grok-4.7', 'custom:gw:m']) expect(classifyModel(id)).toEqual({ kind: 'route', route: parseModel(id)! })
   })
 })

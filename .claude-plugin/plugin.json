@@ -1,7 +1,7 @@
 {
   "name": "provider-router",
-  "version": "0.1.2",
-  "description": "Route model requests by model-id prefix (anthropic:, openai:, zai:, custom:) to other providers, while unprefixed models stay on your Claude subscription.",
+  "version": "0.1.3",
+  "description": "Route model requests by model-id prefix (anthropic:, openai:, zai:, xai:, custom:) to other providers, while unprefixed models stay on your Claude subscription.",
   "license": "MIT",
   "author": { "name": "cc-provider-router contributors" },
   "homepage": "https://github.com/oleggohman/cc-provider-router",
@@ -10,6 +10,7 @@
     "openaiApiKey": { "type": "string", "title": "OpenAI API key", "description": "Key for openai: models. Overrides env OPENAI_API_KEY.", "sensitive": true, "required": false },
     "anthropicApiKey": { "type": "string", "title": "Anthropic Platform API key", "description": "Key for anthropic: models. Overrides env ROUTER_ANTHROPIC_API_KEY.", "sensitive": true, "required": false },
     "zaiApiKey": { "type": "string", "title": "Z.ai API key", "description": "Key for zai: models. Overrides env ZAI_API_KEY.", "sensitive": true, "required": false },
+    "xaiApiKey": { "type": "string", "title": "xAI API key", "description": "Key for xai: models. Overrides env XAI_API_KEY.", "sensitive": true, "required": false },
     "customEndpoints": { "type": "string", "multiple": true, "title": "Custom endpoints", "description": "OpenAI-compatible endpoints as name=url, used as custom:<name>:<model>. Keys from env ROUTER_CUSTOM_API_KEYS (name=key,...).", "default": [] },
     "contextWindows": { "type": "string", "multiple": true, "title": "Context windows", "description": "Extra context windows as model=tokens, e.g. openai:my-model=128000.", "default": [] },
     "autoModeClassifier": { "type": "boolean", "title": "Auto mode classifier", "description": "In auto mode, let Claude Code's own classifier requests reach the Anthropic API on your subscription; they carry the session's prompts and tool calls. Off: once a step is routed, those requests are refused and auto mode refuses tool calls no rule settles.", "default": true, "required": false }

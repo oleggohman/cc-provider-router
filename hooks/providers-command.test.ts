@@ -9,6 +9,7 @@ const OA = 'oa-test-key-AAAA1111'
 const AN = 'an-test-key-BBBB2222'
 const ZA = 'za-test-key-CCCC3333'
 const GW = 'gw-test-key-DDDD4444'
+const XA = 'xa-test-key-EEEE5555'
 const STATS = { shadowLeaks: 0, shadowRefused: 2, pending: 0 }
 
 const full = () =>
@@ -77,6 +78,42 @@ describe('statusText', () => {
     const t = statusText(cfg({}, { custom: new Map([['gw', { url: 'https://user:pa55word@gw.example/v1', key: undefined }]]) }), STATS)
     expect(t).not.toContain('pa55word')
     expect(t).toContain('https://gw.example/v1')
+  })
+})
+
+describe('xai row', () => {
+  test('/providers status line: base URL and key yes/no, with the key names when unset', () => {
+    const withKey = statusText(cfg({ xai: XA }), STATS)
+    expect(withKey).toMatch(/xai\s+https:\/\/api\.x\.ai\/v1\s+key: yes/)
+    expect(withKey).not.toContain(XA)
+    const noKey = statusText(cfg({}), STATS)
+    expect(noKey).toMatch(/xai\s+https:\/\/api\.x\.ai\/v1\s+key: no \(set XAI_API_KEY or \/config xaiApiKey\)/)
+  })
+
+  test('models: GET https://api.x.ai/v1/models with the bearer key, ids listed as xai:<id>', async () => {
+    const p = provider([{ status: 200, text: openaiList(['grok-4.7', 'grok-4.3']) }])
+    const t = await listModels(p.fetch, cfg({ xai: XA }), sleeper().sleep)
+    expect(p.calls.map(c => c.url)).toEqual(['https://api.x.ai/v1/models'])
+    expect(p.calls[0]!.init.method).toBe('GET')
+    expect(p.calls[0]!.init.headers.authorization).toBe(`Bearer ${XA}`)
+    expect(t).toContain('xai: 2 models')
+    expect(t).toContain('xai:grok-4.7')
+    expect(t).toContain('xai:grok-4.3')
+    expect(t).not.toContain(XA)
+  })
+
+  test('models: an unkeyed xai row is skipped with no call', async () => {
+    const p = provider([{ status: 200, text: openaiList(['gpt-5']) }])
+    const t = await listModels(p.fetch, cfg({ openai: OA }), sleeper().sleep)
+    expect(p.calls.some(c => c.url.includes('x.ai'))).toBe(false)
+    expect(t).toContain('xai: skipped (no key)')
+  })
+
+  test('models: an xAI error echoing the key is reported without it', async () => {
+    const p = provider([{ status: 401, text: JSON.stringify({ error: { message: `Incorrect API key: ${XA}` } }) }])
+    const t = await listModels(p.fetch, cfg({ xai: XA }), sleeper().sleep)
+    expect(t).toContain('[provider-router] xai error 401')
+    expect(t).not.toContain(XA)
   })
 })
 

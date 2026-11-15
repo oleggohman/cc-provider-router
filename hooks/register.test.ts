@@ -68,13 +68,29 @@ function engineStub(on: any) {
 test('a malformed prefixed id is answered locally and never reaches the engine', async ($, on) => {
   on('clock.sleep', () => ({ value: undefined }) as any)
   const seen = engineStub(on)
-  for (const model of ['openai:', 'custom:gw', 'custom:gw:']) {
+  for (const model of ['openai:', 'xai:', 'custom:gw', 'custom:gw:']) {
     const { result } = await drain($.turn.step({ turnId: 't1', index: 0, model, messageCount: 1 }) as any)
     expect(result.answer).toContain('[provider-router]')
     expect(result.answer).toContain('malformed model id')
     expect(result.stopReason).toBe('refusal')
   }
   expect(seen.length).toBe(0)
+})
+
+test('an xai: step with no key is answered locally: no shadow, no network', async ($, on) => {
+  on('clock.sleep', () => ({ value: undefined }) as any)
+  on('env.get', () => ({ value: undefined }) as any)
+  const net: any[] = []
+  on('http.fetch', (_$: any, e: any) => {
+    net.push(e)
+    return { value: { status: 200, ok: true, headers: {}, text: '' } }
+  })
+  const seen = engineStub(on)
+  const { result } = await drain($.turn.step({ turnId: 't1', index: 0, model: 'xai:grok-4.7', messageCount: 1 }) as any)
+  expect(result.answer).toContain('[provider-router] xai error')
+  expect(result.answer).toContain('XAI_API_KEY')
+  expect(seen.length).toBe(0)
+  expect(net.length).toBe(0)
 })
 
 test('a failed config load is not kept: the step ends with a local error, the next one loads again', async ($, on) => {

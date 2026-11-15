@@ -1,16 +1,20 @@
 // Model-id router: decides from a model id's prefix which provider serves it.
 
 // The built-in providers: `<provider>:<id>`, each with its own key (config.ts).
-export type SimpleProvider = 'anthropic' | 'openai' | 'zai'
+export type SimpleProvider = 'anthropic' | 'openai' | 'zai' | 'xai'
 
 export type Route = { [P in SimpleProvider]: { provider: P; model: string } }[SimpleProvider] | { provider: 'custom'; name: string; model: string }
 
-const SIMPLE: readonly SimpleProvider[] = ['anthropic', 'openai', 'zai']
+const SIMPLE: readonly SimpleProvider[] = ['anthropic', 'openai', 'zai', 'xai']
+
+// Every router prefix: an id starting with one is the router's, never the
+// engine's (shadow.ts refuses such ids on the way to the first-party host).
+export const ROUTER_PREFIXES: readonly string[] = [...SIMPLE, 'custom']
 
 // The id forms the router accepts, as named in error text.
 export const ID_FORMS = `${SIMPLE.map(p => `${p}:<id>`).join(', ')} or custom:<name>:<id>`
 
-// Parses `anthropic:<id>`, `openai:<id>`, `zai:<id>` or `custom:<name>:<id>`.
+// Parses `anthropic:<id>`, `openai:<id>`, `zai:<id>`, `xai:<id>` or `custom:<name>:<id>`.
 // `<id>` may contain `/` and `:`. Returns null for an unprefixed id (the
 // router passes it to the engine untouched) and for a malformed one (see
 // malformedPrefix).
@@ -47,7 +51,7 @@ export function classifyModel(id: string): ModelKind {
   const route = parseModel(id)
   if (route) return { kind: 'route', route }
   const prefix = prefixOf(id)
-  return [...SIMPLE, 'custom'].includes(prefix) ? { kind: 'malformed', prefix } : { kind: 'unprefixed' }
+  return ROUTER_PREFIXES.includes(prefix) ? { kind: 'malformed', prefix } : { kind: 'unprefixed' }
 }
 
 // The label of a custom endpoint in errors and /providers.

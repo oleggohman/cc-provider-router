@@ -46,7 +46,7 @@
 // never grants the exception.
 
 import type { FetchSide } from './call.ts'
-import { classifyModel } from './route.ts'
+import { ROUTER_PREFIXES, classifyModel } from './route.ts'
 import { stubSse } from './sse.ts'
 
 export const SHADOW_MODEL = 'provider-router-shadow'
@@ -231,8 +231,9 @@ function namesShadow(e: FetchEvent, body: any | null): boolean {
   return body ? body.model === SHADOW_MODEL : mentionsShadow(e.init?.body)
 }
 
-// Router prefixes, as route.ts parses them (a test keeps the two in step).
-const PREFIXES = '(?:anthropic|openai|zai|custom)'
+// Router prefixes, taken from route.ts so a new provider is refused here too
+// (a test also checks them against ID_FORMS).
+const PREFIXES = `(?:${ROUTER_PREFIXES.join('|')})`
 // A model id with a router prefix, or a bare provider name (the classifier's
 // model check, as scripts/probes/check-predicate.py has it).
 const ROUTER_ID = new RegExp(`^${PREFIXES}(?::|$)`)
