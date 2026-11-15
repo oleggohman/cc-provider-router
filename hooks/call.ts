@@ -6,7 +6,7 @@
 // A provider call already sent cannot be cancelled (its cost still accrues);
 // its late answer or failure is ignored.
 //
-// Verified live (spike/README.md): a `$.clock.sleep` racing an in-flight
+// Verified live (docs/design-notes.md): a `$.clock.sleep` racing an in-flight
 // `$.http.fetch` does not use up the hook's 10 s budget (25 s fetch won over
 // a 60 s timer; a 15 s timer won over a 25 s fetch).
 

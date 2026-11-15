@@ -1,7 +1,7 @@
 // Context windows and compaction for routed models.
 //
 // The engine assumes a 1M window for an unknown model id, and a routed
-// step's `stop.usage` does not feed `$.session.usage()` (spike/README.md),
+// step's `stop.usage` does not feed `$.session.usage()` (docs/design-notes.md),
 // so the engine would not compact in time. The mod keeps its own last
 // input-token count per loop and, at the end of a main-loop turn whose last
 // routed step passed 85% of the model's known window, schedules
