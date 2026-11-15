@@ -506,6 +506,29 @@ describe('routed steps across a thread', () => {
     }
   })
 
+  test('a conversation rebuilt from history keeps the tools the steps added and removed', async () => {
+    resetShadow()
+    const GONE = { name: 'Gone', input_schema: { type: 'object' } }
+    const create = {
+      ...createBody,
+      tools: [BASH, PLACEHOLDER, GONE],
+      messages: [...createBody.messages, { role: 'system', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'Gone' } }] }],
+    }
+    const eng = threadEngine([create, continueBody])
+    const p = provider([{ status: 200, text: toolReply }, { status: 200, text: textReply }])
+    const threads = new Map<string, ThreadState>()
+    const signal = new AbortController().signal
+    await drain(routedStep(e(0), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal }, threads))
+    expect(JSON.parse(p.calls[0]!.init.body).tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+    dropBase(threads, 'main')
+    // The session's API history holds no tool definitions or system messages.
+    const history = [createBody.messages[0], { role: 'assistant', content: REPLY }, ...continueBody.messages]
+    const second = await drain(routedStep(e(1), eng.next, route, cfg({ zai: 'k-zai-1' }), { fetch: p.fetch, sleep: sleeper().sleep, signal, history: async () => history }, threads))
+    expect(second.result.answer).toBe('SMOKE')
+    expect(JSON.parse(p.calls[1]!.init.body).tools.map((t: any) => t.name)).toEqual(['Bash', 'mcp__x__late'])
+    expect(eng.network.length).toBe(0)
+  })
+
   test('a continue from an earlier turn (rewind) does not resend the dropped turns', async () => {
     resetShadow()
     const u = (t: string) => [{ role: 'user', content: [{ type: 'text', text: t }] }]

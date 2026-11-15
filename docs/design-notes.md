@@ -98,6 +98,8 @@ needs a beta header). `hooks/thread.ts` therefore:
   `tool_result` blocks first;
 - records an error step as an assistant text turn (the engine records it the
   same way) and records nothing for a cancelled step;
+- stores the tools in force after a step's `tool_addition` / `tool_removal`
+  blocks, since the session history holds no tool changes;
 - binds each continue's `previous_message_id` to the length of the
   conversation it built on; a continue naming an anchor bound earlier (a
   `/rewind`) cuts the conversation back to it, and one past the known

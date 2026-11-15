@@ -114,11 +114,14 @@ export function resolveThread(body: any, state: ThreadState | undefined, recover
 
 // Records the step: the messages sent plus the assistant turn the engine now
 // holds (the reply, or the error text the step yielded), and the anchors
-// resolveThread bound.
+// resolveThread bound. The tools are the ones in force after the step's
+// additions and removals (effectiveTools): a conversation later rebuilt from
+// the session history, which holds no tool changes, keeps them.
 export function recordStep(threads: Threads, key: string, body: any, assistant: any[], anchors: Anchors): void {
   const messages = Array.isArray(body?.messages) ? body.messages : []
   const base = assistant.length ? [...messages, { role: 'assistant', content: assistant }] : [...messages]
-  threads.set(key, { system: body?.system, tools: Array.isArray(body?.tools) ? body.tools : undefined, base, anchors })
+  const tools = effectiveTools(body)
+  threads.set(key, { system: body?.system, tools: Array.isArray(body?.tools) || tools.length ? tools : undefined, base, anchors })
 }
 
 // cache_control without `scope` (a first-party field).
@@ -146,27 +149,20 @@ function cleanBlock(b: any): any {
   return c
 }
 
-// A plain Messages API request: system messages folded into user text, tool
-// additions/removals applied to `tools`, consecutive same-role messages
-// merged (tool_result blocks first), first-party leftovers dropped.
-export function normalizeBody(body: any): any {
+// The tools in force after the body's messages: `tools` without the
+// placeholder, with the `tool_addition` / `tool_removal` blocks of its system
+// messages applied in order. Replaying them on the result changes nothing.
+export function effectiveTools(body: any): any[] {
   const tools: any[] = (Array.isArray(body?.tools) ? body.tools : []).filter((t: any) => t?.name !== PLACEHOLDER_TOOL)
   const setTool = (def: any) => {
     const i = tools.findIndex(t => t?.name === def?.name)
     if (i >= 0) tools[i] = def
     else tools.push(def)
   }
-
-  const plain: any[] = []
   for (const m of Array.isArray(body?.messages) ? body.messages : []) {
-    if (m?.role !== 'system') {
-      plain.push(m)
-      continue
-    }
-    const text: any[] = []
+    if (m?.role !== 'system') continue
     for (const b of blocksOf(m.content)) {
-      if (b?.type === 'text') text.push(b)
-      else if (b?.type === 'tool_addition' && b.tool?.type === 'tool_definition' && b.tool.definition?.name) setTool(b.tool.definition)
+      if (b?.type === 'tool_addition' && b.tool?.type === 'tool_definition' && b.tool.definition?.name) setTool(b.tool.definition)
       else if (b?.type === 'tool_addition' && b.tool?.type === 'tool_reference') {
         const i = tools.findIndex(t => t?.name === b.tool.name)
         if (i >= 0 && tools[i] && 'defer_loading' in tools[i]) {
@@ -178,6 +174,23 @@ export function normalizeBody(body: any): any {
         if (i >= 0) tools.splice(i, 1)
       }
     }
+  }
+  return tools
+}
+
+// A plain Messages API request: system messages folded into user text, tool
+// additions/removals applied to `tools`, consecutive same-role messages
+// merged (tool_result blocks first), first-party leftovers dropped.
+export function normalizeBody(body: any): any {
+  const tools = effectiveTools(body)
+
+  const plain: any[] = []
+  for (const m of Array.isArray(body?.messages) ? body.messages : []) {
+    if (m?.role !== 'system') {
+      plain.push(m)
+      continue
+    }
+    const text = blocksOf(m.content).filter(b => b?.type === 'text')
     if (text.length) plain.push({ role: 'user', content: text })
   }
 
