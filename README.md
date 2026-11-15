@@ -163,7 +163,9 @@ ids such as `openai:gpt-5.1` or `anthropic:claude-sonnet-4-6` are covered):
 `openai:gpt-4o*` (128K), `openai:o1*`, `o3*`, `o4-mini*` (200K; `o1-mini` 128K),
 `anthropic:claude-opus*`, `claude-sonnet*`, `claude-haiku*` (200K),
 `zai:glm*` (200K; `glm-4.5*` 128K). It compacts a routed main session after a
-turn that used 85% of the window. Automatic compaction needs an interactive
+turn that used 85% of the input room: the window less the model's output
+limit (below), which every request reserves, so `openai:gpt-5` compacts at
+about 231K input tokens, not 340K. Automatic compaction needs an interactive
 session: under `claude -p` there is none, and a context-length error ends the
 step. `custom:` models and anything else need a `model=tokens` entry, with the
 full prefixed id (matched exactly), in the `/config` list field

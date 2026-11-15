@@ -23,6 +23,12 @@ describe('providerError', () => {
     expect(providerError('openai', 400, '{"error":{"message":"bad tool schema"}}').stopReason).toBe('refusal')
   })
 
+  test('Anthropic input + max_tokens over the window is a context-length error', () => {
+    const body = '{"type":"error","error":{"type":"invalid_request_error","message":"input length and `max_tokens` exceed context limit: 187254 + 64000 > 200000, decrease input length or `max_tokens` and try again"}}'
+    expect(providerError('anthropic', 400, body).stopReason).toBe('model_context_window_exceeded')
+    expect(providerError('openai', 429, '{"error":{"message":"rate limit reached"}}').stopReason).toBe('refusal')
+  })
+
   test('key material is stripped', () => {
     const key = 'sk-proj-ABCDEFGHIJKLMNOP1234'
     const r = providerError('openai', 401, `{"error":{"message":"Incorrect API key provided: ${key}"}}`, [key])

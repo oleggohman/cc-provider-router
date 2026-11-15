@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { COMPACT_AT, maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
+import { COMPACT_AT, compactThreshold, maybeCompact, recordUsage, withContextHint, type UsageMap } from './context.ts'
 import { errorChunks, localError, providerError } from './errors.ts'
+import { maxOutputTokens, windowFor } from './limits.ts'
 import { routedStep } from './register.ts'
 import { resetShadow } from './shadow.ts'
 import { cfg, drain, engine, provider, sleeper, step, tick } from '../tests/harness.ts'
@@ -65,12 +66,38 @@ describe('compaction from turn.complete', () => {
     expect(maybeCompact(t, windows, compactor().deps)).toBe(true)
   })
 
-  test('under 85%: nothing scheduled', async () => {
+  test('under the threshold: nothing scheduled', async () => {
     const t = fresh()
     const c = compactor()
-    recordUsage(t, 'main', 'openai:gpt-5', usage(300000))
+    recordUsage(t, 'main', 'openai:gpt-5', usage(200000))
     expect(maybeCompact(t, windows, c.deps)).toBe(false)
     expect(c.queued.length).toBe(0)
+  })
+
+  test('the threshold leaves room for the reserved max output: every built-in row and a small custom window', async () => {
+    const ids = ['openai:gpt-5-chat', 'openai:gpt-5', 'openai:gpt-4.1', 'openai:gpt-4o', 'openai:o1-mini', 'openai:o1', 'openai:o3', 'openai:o4-mini', 'anthropic:claude-opus-4-6', 'anthropic:claude-sonnet-4-5', 'anthropic:claude-haiku-4-5', 'zai:glm-4.5', 'zai:glm-5.3']
+    const custom = new Map([['custom:gw:m', 32768]])
+    for (const id of [...ids, 'custom:gw:m']) {
+      const window = windowFor(id, custom)!
+      const room = window - maxOutputTokens(id)
+      const at = compactThreshold(id, custom)!
+      expect(at).toBeLessThan(room)
+      expect(at).toBe(Math.floor(room * COMPACT_AT))
+      // A main session just over it compacts; just under it does not.
+      const t = fresh()
+      recordUsage(t, 'main', id, usage(at))
+      expect(maybeCompact(t, custom, compactor().deps)).toBe(true)
+      recordUsage(t, 'main', id, usage(at - 1))
+      expect(maybeCompact(t, custom, compactor().deps)).toBe(false)
+    }
+    // gpt-5: 85% of 400K - 128K, not of 400K.
+    expect(compactThreshold('openai:gpt-5', windows)).toBe(231200)
+  })
+
+  test('a window no larger than the output reserve: 85% of the window', async () => {
+    const small = new Map([['custom:gw:tiny', 8192]])
+    expect(compactThreshold('custom:gw:tiny', small)).toBe(Math.floor(8192 * COMPACT_AT))
+    expect(compactThreshold('openai:mystery', small)).toBeUndefined()
   })
 
   test('unknown window: nothing scheduled', async () => {

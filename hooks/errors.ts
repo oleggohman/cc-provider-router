@@ -26,7 +26,7 @@ const STATUS_TEXT: Record<number, string> = {
   529: 'provider overloaded',
 }
 
-const CONTEXT_RE = /context[ _-]?(length|window)|maximum context|prompt is too long|too many tokens|context_length_exceeded|reduce the length/i
+const CONTEXT_RE = /context[ _-]?(length|window|limit)|maximum context|prompt is too long|too many tokens|context_length_exceeded|reduce the length/i
 
 // Patterns that look like credentials, stripped even when not configured here.
 const KEY_PATTERNS = [/\bsk-[A-Za-z0-9_\-]{8,}/g, /\bBearer\s+[A-Za-z0-9._\-]{8,}/gi, /\b[A-Za-z0-9]{24,}\.[A-Za-z0-9]{8,}\b/g]

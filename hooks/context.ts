@@ -4,7 +4,8 @@
 // step's `stop.usage` does not feed `$.session.usage()` (docs/design-notes.md),
 // so the engine would not compact in time. The mod keeps its own last
 // input-token count per loop and, at the end of a main-loop turn whose last
-// routed step passed 85% of the model's known window, schedules
+// routed step passed 85% of the input room (the model's known window less the
+// output each request reserves; compactThreshold), schedules
 // `$.session.compact()` with `$.clock.after`: never synchronously inside the
 // `turn.complete` hook (compact rejects while a turn runs) and never during
 // `turn.step`. Subagents do not compact from here: the agent definition's
@@ -13,7 +14,7 @@
 
 import { num } from './chunks.ts'
 import type { ErrorReply } from './errors.ts'
-import { windowFor } from './limits.ts'
+import { maxOutputTokens, windowFor } from './limits.ts'
 import { loopKeyOf } from './shadow.ts'
 
 export const COMPACT_AT = 0.85
@@ -41,6 +42,18 @@ export function recordUsage(map: UsageMap, key: string, model: string, usage: un
   if (inputTokens > 0) map.set(key, { model, inputTokens })
 }
 
+// The input size at which a routed main session compacts: COMPACT_AT of the
+// input room, the window less the max output every request reserves
+// (maxOutputTokens, request.ts); providers reject input + max_tokens above the
+// window. A window no larger than that reserve (a small contextWindows entry)
+// falls back to COMPACT_AT of the window. Undefined when the window is unknown.
+export function compactThreshold(model: string, windows: ReadonlyMap<string, number>): number | undefined {
+  const window = windowFor(model, windows)
+  if (!window) return undefined
+  const room = window - maxOutputTokens(model)
+  return Math.floor((room > 0 ? room : window) * COMPACT_AT)
+}
+
 export type CompactDeps = {
   after: (ms: number, fn: () => void) => unknown
   compact: () => Promise<unknown>
@@ -54,8 +67,8 @@ export function maybeCompact(map: UsageMap, windows: ReadonlyMap<string, number>
   const main = loopKeyOf(undefined)
   const rec = map.get(main)
   if (!rec) return false
-  const window = windowFor(rec.model, windows)
-  if (!window || rec.inputTokens < window * COMPACT_AT) return false
+  const at = compactThreshold(rec.model, windows)
+  if (at === undefined || rec.inputTokens < at) return false
   map.delete(main)
   const run = async () => {
     try {
