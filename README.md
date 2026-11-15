@@ -298,7 +298,8 @@ written up in [`docs/design-notes.md`](docs/design-notes.md).
   same without sending anything. `/providers` shows `routing is off` then.
   Routing turns back on by itself as soon as the router sees any Claude Code
   request (a step on a model without a router prefix), which cannot happen
-  under such a guard; otherwise restart Claude Code. A routed step that
+  under such a guard (another plugin's request does not count, whatever its
+  headers); otherwise restart Claude Code. A routed step that
   sends no request at all (another plugin answered it, or Claude Code failed
   before sending) looks the same to the router and also turns routing off
   until then; in a session where every step is routed, that lasts until a

@@ -87,7 +87,12 @@ models.
   before sending; the types give no reliable way to tell: `stopReason` is
   null both then and for a failed request). So the flag heals: any engine
   request the hook sees (`shadowFetch` or `shadowFetchFailed`) clears it,
-  since under the guard none is ever seen. Residual gap: a session with no
+  since under the guard none is ever seen. For the breaker (both counting
+  engine requests and clearing the flag) an engine request is one whose
+  host-set `next.origin.plugin` is `"engine"`: nothing a plugin writes
+  reaches it, while `compress` and the session header are caller-controlled
+  and another plugin's `$.http.fetch` passes through the same hook. The
+  markers stay the wide rule for refusing. Residual gap: a session with no
   unprefixed traffic stays off until the module reloads.
 
 ## Message threads (found in the live smoke tests)

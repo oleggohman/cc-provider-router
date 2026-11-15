@@ -295,6 +295,9 @@ describe('normalizeBody', () => {
   })
 })
 
+// The host-set `next.origin` of a request the engine raised.
+const ENGINE = { origin: { plugin: 'engine', tier: 'core' } }
+
 // An engine stand-in that sends one given body per step through shadowFetch.
 function threadEngine(bodies: any[]) {
   const network: any[] = []
@@ -303,10 +306,11 @@ function threadEngine(bodies: any[]) {
     const headers: Record<string, string> = { 'x-claude-code-session-id': 's1' }
     if (e.agentId) headers['x-claude-code-agent-id'] = e.agentId
     const body = { ...bodies[i++], model: e.model }
-    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, (x: any) => {
+    const beneath = (x: any) => {
       network.push(x)
       return { value: { status: 200, ok: true, headers: {}, text: '' } }
-    })
+    }
+    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers, compress: 'gzip', body: JSON.stringify(body) } }, Object.assign(beneath, ENGINE))
     yield { kind: 'stop', stopReason: 'end_turn', usage: ZERO }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [] }
   }
@@ -617,9 +621,9 @@ describe('routed steps across a thread', () => {
     const inner = threadEngine([createBody, continueBody])
     const next = async function* (ev: any): AsyncGenerator<any, any> {
       if (i++ === 1) {
-        const out: any = await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers: { 'x-claude-code-session-id': 's1' }, compress: 'gzip', body: JSON.stringify({ model: ev.model, messages: [] }) } }, () => {
+        const out: any = await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers: { 'x-claude-code-session-id': 's1' }, compress: 'gzip', body: JSON.stringify({ model: ev.model, messages: [] }) } }, Object.assign(() => {
           throw new Error('network')
-        })
+        }, ENGINE))
         expect(out.value.status).toBe(400)
         return { turnId: ev.turnId, index: ev.index, answer: '', toolUses: [] }
       }
@@ -676,7 +680,7 @@ describe('routed steps across a thread', () => {
     expect(calls).toBe(2)
     expect(p.calls.length).toBe(1)
     // An unprefixed engine request seen by the hook turns routing back on.
-    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers: { 'x-claude-code-session-id': 's1' }, compress: 'gzip', body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] }) } }, () => ({ value: { status: 200, ok: true, headers: {}, text: '' } }))
+    await shadowFetch({ url: 'https://api.anthropic.com/v1/messages', init: { method: 'POST', headers: { 'x-claude-code-session-id': 's1' }, compress: 'gzip', body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] }) } }, Object.assign(() => ({ value: { status: 200, ok: true, headers: {}, text: '' } }), ENGINE))
     // Without history: the clear error (the conversation was dropped).
     const lost = await drain(routedStep(e(3), next, route, cfg({ zai: 'k-zai-1' }), io, threads))
     expect(lost.result.answer).toContain('/clear')

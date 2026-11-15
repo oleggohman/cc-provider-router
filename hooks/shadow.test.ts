@@ -10,7 +10,9 @@ import { cfg, drain, sleeper, tick, ZERO } from '../tests/harness.ts'
 
 const URL = 'https://api.anthropic.com/v1/messages?beta=true'
 
-type Req = { agent?: string | null; model?: string; messages?: number; tools?: boolean; engine?: boolean; body?: unknown }
+// `origin`: who raised the request (`next.origin.plugin`, set by the host);
+// "engine" by default for a request with engine markers, this mod otherwise.
+type Req = { agent?: string | null; model?: string; messages?: number; tools?: boolean; engine?: boolean; body?: unknown; origin?: string }
 
 function fetchEvent(r: Req): any {
   const headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -40,8 +42,14 @@ function network() {
   return { calls, next }
 }
 
+// The hook's `next` for a request raised by `plugin`: the network beneath,
+// with the host-set `next.origin`.
+function nextFrom(net: ReturnType<typeof network>, plugin: string) {
+  return Object.assign((e: any) => net.next(e), { origin: { plugin, tier: plugin === 'engine' ? 'core' : 'append' } })
+}
+
 async function send(net: ReturnType<typeof network>, r: Req): Promise<any> {
-  const out: any = await shadowFetch(fetchEvent(r), net.next)
+  const out: any = await shadowFetch(fetchEvent(r), nextFrom(net, r.origin ?? (r.engine === false ? 'provider-router' : 'engine')))
   return out.value
 }
 
@@ -575,8 +583,56 @@ describe('blind capture: the http.fetch hook never sees the engine request', () 
     const net = network()
     await drain(routedStep(step(), blindEngine(net).next, ROUTE, CFG, counting().io, new Map()))
     expect(shadowStats().blind).toBe(true)
-    shadowFetchFailed(fetchEvent({ model: 'claude-sonnet-4-5' }), Object.assign((e: any) => net.next(e), { called: false }))
+    shadowFetchFailed(fetchEvent({ model: 'claude-sonnet-4-5' }), Object.assign(nextFrom(net, 'engine'), { called: false }))
     expect(shadowStats().blind).toBe(false)
+  })
+
+  test("another plugin's request with engine markers neither turns routing back on nor makes a later step call next", async () => {
+    resetShadow()
+    const net = network()
+    const p = counting()
+    await drain(routedStep(step(), blindEngine(net).next, ROUTE, CFG, p.io, new Map()))
+    expect(shadowStats().blind).toBe(true)
+    // `compress` and the session header are caller-controlled; only the
+    // host-set origin proves an engine request.
+    const forged = (strip?: (ev: any) => void) => {
+      const ev = fetchEvent({ model: 'claude-sonnet-4-5' })
+      strip?.(ev)
+      return ev
+    }
+    const events = [forged(), forged(ev => delete ev.init.headers['x-claude-code-session-id']), forged(ev => delete ev.init.compress)]
+    for (const ev of events) {
+      await shadowFetch(ev, nextFrom(net, 'other-plugin'))
+      shadowFetchFailed(ev, Object.assign(nextFrom(net, 'other-plugin'), { called: false }))
+      shadowFetchFailed(ev, Object.assign(nextFrom(net, 'other-plugin'), { called: true }))
+    }
+    expect(shadowStats().blind).toBe(true)
+    let calls = 0
+    const counted = async function* (): AsyncGenerator<any, any> {
+      calls++
+    }
+    const off = await drain(routedStep(step(), counted, ROUTE, CFG, p.io, new Map()))
+    expect(off.result.answer).toContain('routing is off')
+    expect(calls).toBe(0)
+    expect(p.calls.length).toBe(0)
+    // The one the guard let through before the breaker, then the forged ones.
+    expect(net.calls.length).toBe(1 + events.length * 3)
+    expect(net.calls.slice(1).some((c: any) => String(c.init?.body).includes(SHADOW_MODEL))).toBe(false)
+  })
+
+  test("another plugin's engine-marked request during an unseen shadow does not stop routing turning off", async () => {
+    resetShadow()
+    const net = network()
+    // The guard hides the engine's shadow request; another plugin's marked
+    // fetch passes through this mod's hook meanwhile.
+    const masked = async function* (e: any): AsyncGenerator<any, any> {
+      await send(net, { model: 'claude-sonnet-4-5', origin: 'other-plugin' })
+      net.next(fetchEvent({ agent: e.agentId, messages: e.messageCount }))
+      throw new Error('404 model not found')
+    }
+    const first = await drain(routedStep(step(), masked, ROUTE, CFG, counting().io, new Map()))
+    expect(first.result.answer).toContain('routing is off')
+    expect(shadowStats().blind).toBe(true)
   })
 
   test('a shadow the hook saw but refused (not captured) does not turn routing off', async () => {

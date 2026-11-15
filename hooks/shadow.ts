@@ -19,7 +19,9 @@
 // - Circuit breaker: a shadow step that ends uncaptured (no Esc) while the
 //   hook saw no engine request at all may mean engine requests bypass this
 //   mod; every later shadow step is then refused before `next`, until the
-//   hook sees an engine request (or the module reloads).
+//   hook sees an engine request (or the module reloads). For the breaker an
+//   engine request is one the host raised as the engine (`next.origin`), not
+//   one with engine markers (any plugin can set those).
 // - The stub reports zero usage; its chunks are drained and never yielded.
 
 import { ZERO_USAGE } from './chunks.ts'
@@ -39,14 +41,17 @@ const pending = new Map<string, Pending>()
 const counters = { shadowLeaks: 0, shadowRefused: 0 }
 
 // Circuit breaker. `engineSeen` counts the engine requests the http.fetch
-// hook saw. A shadow step that ends uncaptured, without Esc, while the hook
-// saw no engine request at all, may mean the engine's requests bypass this
-// mod (where an organization's guard loads, only its own mods see them): the
-// shadow request went out unseen. A step that sent nothing (a hook beneath
-// answered it, or the engine failed before sending) looks the same. `blind`
-// then refuses every later shadow step before `next` is called, until the
-// hook sees an engine request (that disproves blindness; under such a guard
-// none is ever seen) or the module reloads.
+// hook saw, by the host-set `next.origin.plugin === 'engine'` alone: another
+// plugin's fetch can carry `compress` or the session header, and counting it
+// would keep the breaker from tripping or clear it. A shadow step that ends
+// uncaptured, without Esc, while the hook saw no engine request at all, may
+// mean the engine's requests bypass this mod (where an organization's guard
+// loads, only its own mods see them): the shadow request went out unseen. A
+// step that sent nothing (a hook beneath answered it, or the engine failed
+// before sending) looks the same. `blind` then refuses every later shadow
+// step before `next` is called, until the hook sees an engine request (that
+// disproves blindness; under such a guard none is ever seen, and another
+// plugin's fetch cannot pose as one) or the module reloads.
 const breaker = { engineSeen: 0, blind: false }
 
 const BLIND = "routing is off: this plugin saw no engine request for a routed step (an organization guard may hide Claude Code's requests), so none is sent; it resumes once the plugin sees a Claude Code request, or restart Claude Code"
@@ -88,9 +93,23 @@ function loopKey(headers: Record<string, string> | undefined): string {
 
 // Engine requests carry `compress` and the session header; the mod's own
 // `$.http.fetch` calls carry neither. Either marker counts (the wider rule is
-// the safer one: an engine request is never mistaken for the mod's own).
+// the safer one: an engine request is never mistaken for the mod's own). Any
+// plugin can set them, so they only ever make handling stricter; they never
+// count as proof for the circuit breaker (see noteOrigin).
 export function isEngineRequest(e: FetchEvent): boolean {
   return e.init?.compress !== undefined || header(e.init?.headers, 'x-claude-code-session-id') !== undefined
+}
+
+// The hook's `next`, with the host-set origin of the request.
+type Origin = { readonly origin?: { readonly plugin?: string } }
+
+// Proof the engine raised the request: `next.origin`, set by the host alone
+// ("engine" for the engine's own sends); nothing a plugin writes reaches it.
+// Counts it for the circuit breaker and clears the breaker.
+function noteOrigin(next: Origin): void {
+  if (next.origin?.plugin !== 'engine') return
+  breaker.engineSeen++
+  breaker.blind = false
 }
 
 function stubSse(): string {
@@ -152,7 +171,8 @@ function countMatches(messages: unknown, expected: number): boolean {
 
 // `http.fetch` hook. Returns the local answer, or calls `next` only for
 // requests that are clearly not shadows.
-export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) => R): Promise<R | { value: ShadowResponse }> {
+export async function shadowFetch<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin): Promise<R | { value: ShadowResponse }> {
+  noteOrigin(next)
   const body = parse(e.init?.body)
   if (!isEngineRequest(e)) {
     // Defence in depth: never pass anything that could be a shadow. A routed
@@ -164,8 +184,6 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
     }
     return next(e)
   }
-  breaker.engineSeen++
-  breaker.blind = false
   const key = loopKey(e.init?.headers)
   const p = pending.get(key)
   if (p) {
@@ -186,11 +204,8 @@ export async function shadowFetch<E extends FetchEvent, R>(e: E, next: (e: E) =>
 // Already passed on by the hook: replayed. Otherwise anything that could be
 // a shadow is refused: any request while a shadow is pending, or one naming
 // the shadow model anywhere in its URL or text body.
-export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & { readonly called: boolean }): R | { value: ShadowResponse } {
-  if (isEngineRequest(e)) {
-    breaker.engineSeen++
-    breaker.blind = false
-  }
+export function shadowFetchFailed<E extends FetchEvent, R>(e: E, next: ((e: E) => R) & Origin & { readonly called: boolean }): R | { value: ShadowResponse } {
+  noteOrigin(next)
   if (next.called) return next(e)
   const body = e.init?.body
   if (pending.size > 0 || e.url.includes(SHADOW_MODEL) || (typeof body === 'string' && body.includes(SHADOW_MODEL))) return { value: refuse() }
