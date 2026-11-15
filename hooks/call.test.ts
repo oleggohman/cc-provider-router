@@ -167,4 +167,9 @@ describe('raceCall', () => {
   test('a default timeout exists and is generous for non-streamed replies', () => {
     expect(DEFAULT_TIMEOUT_MS).toBeGreaterThanOrEqual(300_000)
   })
+
+  test("the default timeout is 570 s, below the engine's own 600 s request timeout", () => {
+    expect(DEFAULT_TIMEOUT_MS).toBe(570_000)
+    expect(DEFAULT_TIMEOUT_MS).toBeLessThan(600_000)
+  })
 })

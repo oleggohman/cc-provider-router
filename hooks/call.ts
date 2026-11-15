@@ -14,7 +14,9 @@
 import type { Reply } from './chunks.ts'
 import type { ErrorReply } from './errors.ts'
 
-export const DEFAULT_TIMEOUT_MS = 600_000
+// Below the engine's own request timeout (600 s): when the router answers the
+// engine's request in place, its timer must fire first.
+export const DEFAULT_TIMEOUT_MS = 570_000
 
 // What an adapter sends through `$.http.fetch` and gets back.
 export type FetchInit = { method: string; headers: Record<string, string>; body: string }

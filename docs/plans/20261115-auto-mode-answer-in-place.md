@@ -279,14 +279,14 @@ Each item is answered live and recorded as a row in `docs/design-notes.md` with 
 
 Built and tested on its own; nothing calls it from the hooks yet.
 
-- [ ] write tests: create and continue bodies resolve, normalize and build as today; the provider's reply comes back as SSE (zero usage, the provider's model, a minted id) and the outcome is staged on the job with the real usage; the job's phase moves `captured` → `answered`
-- [ ] write tests for failures, each answered with the empty stub and a staged `error` outcome holding the `ErrorReply`: provider HTTP error; thrown fetch (on the fallback transport the host's `no complete answer within 30000ms` becomes the fallback-specific sentence of Task 7); unreadable reply; a reply whose stop reason the gate rejects; a missing or unrebuildable conversation (the clear error)
-- [ ] write tests for Esc: the signal aborting during the call gives the empty stub at once and a `cancelled` outcome; a signal already aborted at capture does the same without a provider call
-- [ ] write tests for the outbound guard, each answered locally with zero network calls: a routed model equal to `SHADOW_MODEL` (`custom:gw:provider-router-shadow`); a custom endpoint URL containing the shadow model's name; and one positive test: a conversation that merely quotes the name is sent
-- [ ] write tests that the step's system prompt and effective tools (after `tool_addition` / `tool_removal`) are kept on the loop when the handler captures the request, while the conversation and anchors are not
-- [ ] write tests for the timeout (`raceCall` in the handler, mechanism (a); `DEFAULT_TIMEOUT_MS` 570 s) and for job identity: a timeout gives the stub and an `error` outcome with the timed-out text; a late provider success and a late rejection after abandonment change nothing and reject nothing unhandled; a newer job on the same loop is untouched
-- [ ] implement `answerShadow(job, body, io)` and the changes to `call.ts`
-- [ ] run tests, typecheck, validate - must pass before Task 7
+- [x] write tests: create and continue bodies resolve, normalize and build as today; the provider's reply comes back as SSE (zero usage, the provider's model, a minted id) and the outcome is staged on the job with the real usage; the job's phase moves `captured` → `answered`
+- [x] write tests for failures, each answered with the empty stub and a staged `error` outcome holding the `ErrorReply`: provider HTTP error; thrown fetch (on the fallback transport the host's `no complete answer within 30000ms` becomes the fallback-specific sentence of Task 7); unreadable reply; a reply whose stop reason the gate rejects; a missing or unrebuildable conversation (the clear error)
+- [x] write tests for Esc: the signal aborting during the call gives the empty stub at once and a `cancelled` outcome; a signal already aborted at capture does the same without a provider call
+- [x] write tests for the outbound guard, each answered locally with zero network calls: a routed model equal to `SHADOW_MODEL` (`custom:gw:provider-router-shadow`); a custom endpoint URL containing the shadow model's name; and one positive test: a conversation that merely quotes the name is sent
+- [x] write tests that the step's system prompt and effective tools (after `tool_addition` / `tool_removal`) are kept on the loop when the handler captures the request, while the conversation and anchors are not
+- [x] write tests for the timeout (`raceCall` in the handler, mechanism (a); `DEFAULT_TIMEOUT_MS` 570 s) and for job identity: a timeout gives the stub and an `error` outcome with the timed-out text; a late provider success and a late rejection after abandonment change nothing and reject nothing unhandled; a newer job on the same loop is untouched
+- [x] implement `answerShadow(job, body, io)` and the changes to `call.ts` — as built: `answerShadow(job: AnswerJob, body, step: AnswerStep, io: AnswerIO): Promise<string>` (`step` = event, route, config, threads; `io.recovery` injects `recoveryFor`; outcome `reply` holds the whole `Reply` plus `messageId`); the handler sets `answered` then `handed` on return; `providerSend` and `guardFetch` exported for Task 8
+- [x] run tests, typecheck, validate - must pass before Task 7
 
 ### Task 7: Provider transport through a `curl` child process
 
