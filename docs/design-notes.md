@@ -355,6 +355,21 @@ leaves one: it ends the loop itself on timeout and overflow). Only the
 `stdout` pipe carried pieces in these runs; the stderr path is covered by the
 unit and integration tests only.
 
+### Answer in place: acceptance runs (plan Task 12, Claude Code 2.1.325, 2026-11-15/16)
+
+The plugin itself (not the probe mod), `custom:mock:m` against
+`scripts/probes/mock-provider.py`, each `claude` in its own temp directory
+with `--setting-sources project,local`.
+
+| # | Item | Run | Observed |
+|---|---|---|---|
+| 1 | 60 s reply through curl | -p default, `scenario=slow:60` | result `MOCK-SLOW` after 60219 ms; debug `$.process.spawn (provider-router): curl with 3 args` then `curl ended (0) in 60026ms`; `/providers`: `transport: curl` |
+| 2 | the same without curl | as 1, `PATH` = a directory of symlinks to `/opt/homebrew/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` minus `curl` | `curl failed to start: ENOENT: Executable not found in $PATH: "curl"`, then `$.http.fetch (provider-router): POST .../chat/completions`; after 30191 ms the result `[provider-router] custom:mock error: request failed: the reply took longer than 30 s, the limit without curl (...)`; `/providers`: `transport: fetch (30 s limit)` |
+| 3 | interactive, prompt suggestion | pty default, two prompts, observer beneath the router | `source=prompt_suggestion` with `custom:mock:m` → `API hook_denied: provider-router: shadow request refused locally`; the observer saw only telemetry and the session-title request (`claude-haiku-5-5`, sent at prompt submit), nothing naming the shadow model or a prefixed id |
+| 4 | default and accept-edits vs `v0.1.2` | -p, `S=agent` and `S=bash`, HEAD and `git archive v0.1.2` | identical in all 8 runs: `Agent` ran (PONG), the outside `touch` refused `needs approval`, 0 classifier requests |
+
+The auto-mode cases are `scripts/automode-check.sh` (4/4 PASS, plan Task 11).
+
 The unit tests run in the kit, which has no process noun, so the real-curl
 checks (config parsing of injection payloads, the hostile `.curlrc`, argv as
 `ps` shows it, connection drop on Esc and timeout, overflow, a closed port)
