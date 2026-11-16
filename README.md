@@ -88,6 +88,17 @@ Each key comes from an environment variable or from `/config` (the plugin's
 options; the `/config` value wins). Keys entered in `/config` are kept in
 Claude Code's secure storage.
 
+To open the plugin's options directly (keys, custom endpoints, context
+windows, the auto-mode classifier switch):
+
+```
+/plugin configure provider-router@oleggohman-cc-things
+```
+
+The xAI key (Grok models, `xai:grok-...`) is the field "xAI API key". If a
+field is missing, the session still runs an older version of the plugin:
+reload plugins or restart Claude Code after `/plugin update`.
+
 | Prefix | Provider | Env variable | `/config` field |
 |---|---|---|---|
 | `anthropic:` | Anthropic Platform (`https://api.anthropic.com`) | `ROUTER_ANTHROPIC_API_KEY` | `anthropicApiKey` |
