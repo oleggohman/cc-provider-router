@@ -388,7 +388,7 @@ Why: the host ends any `$.http.fetch` at 30 s (Task 2), in `v0.1.2` too; a `curl
 - [x] `CLAUDE.md`: the fail-closed list gains the outbound guard, the prefixed-id rule, the classifier predicate with its stated residual, and the strict `.catch`; the thread-invariant wording follows the delivery table
 - [x] `docs/design-notes.md`: "The shadow step" rewritten for answer in place; the spike tables kept, each pointing at the probe in `scripts/probes/` that reproduces it
 - [x] `CLAUDE.md` Commands: `scripts/automode-check.sh` and the probes, with the note to re-run them after a Claude Code release
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
