@@ -1,6 +1,6 @@
 {
   "name": "provider-router",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Route model requests by model-id prefix (anthropic:, openai:, zai:, xai:, custom:) to other providers, while unprefixed models stay on your Claude subscription.",
   "license": "MIT",
   "author": { "name": "cc-provider-router contributors" },
