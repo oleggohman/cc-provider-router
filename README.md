@@ -156,6 +156,38 @@ claude --plugin-dir ./cc-provider-router --settings router-settings.json
 
 Keep API keys in env variables or `/config`, not in settings files.
 
+### Adding or removing a provider
+
+**Adding** one needs only its key (and, for a custom endpoint, its URL):
+
+1. Set the key: the env variable from the table above, in the shell you start
+   Claude Code from, or the `/config` field. A custom endpoint also needs its
+   `name=url` entry in `customEndpoints` (see
+   [Custom endpoints](#custom-endpoints)).
+2. An env variable is read when Claude Code starts; a `/config` change
+   applies at once (it reloads the plugin).
+3. Check `/providers`: the provider's line ends in `key: yes`, and
+   `/providers models` lists its models.
+
+**Removing** one is the reverse:
+
+1. Clear the `/config` field (or remove it from the settings file) and unset
+   the env variable — `unset ZAI_API_KEY`, and take it out of your shell
+   profile if it is there. For a custom endpoint, also remove its
+   `customEndpoints` entry and its `name=key` pair from
+   `ROUTER_CUSTOM_API_KEYS`.
+2. A `/config` change applies at once; an env change at the next start of
+   Claude Code.
+3. `/providers` then shows `key: no` (or no longer lists the endpoint), and a
+   step on its prefix answers a visible `[provider-router] error` (`no API
+   key for ...`, or `unknown custom endpoint "..."`). Nothing is sent
+   anywhere. Unprefixed models are never affected by any of this.
+
+A `/config` change mid-session reloads the plugin, which also drops the
+router's kept copy of a routed conversation (see
+[History in memory](#limits)): run `/clear` or `/compact` before continuing
+a routed session, or restart Claude Code.
+
 ### Context windows
 
 Claude Code assumes a 1M-token window for model ids it does not know, so on
