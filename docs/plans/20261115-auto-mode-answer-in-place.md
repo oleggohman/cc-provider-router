@@ -381,13 +381,13 @@ Why: the host ends any `$.http.fetch` at 30 s (Task 2), in `v0.1.2` too; a `curl
 **Files:**
 - Modify: `README.md`, `CLAUDE.md`, `docs/design-notes.md`
 
-- [ ] README "How it works": the new flow diagram
-- [ ] README Limits: replace the auto-mode limitation with what now holds: auto mode works; the classifier runs on the subscription and sees the session's prompts and tool calls; the session classifies locally from the first routed step on, subscription loops included; the `autoModeClassifier` opt-out applies to the whole session, and right after a reload with it set a classifier request can be refused once; not behind `ANTHROPIC_BASE_URL`; provider calls go through `curl` (a reply may take up to 570 s); without `curl` the plugin falls back to `$.http.fetch`, where a reply must arrive within 30 s (the host's limit, which `v0.1.2` also has); routed replies are still not streamed
-- [ ] README: correct "Your subscription is never routed and never pays for a routed call" to state the classifier exception exactly
-- [ ] README Troubleshooting: the no-verdict row now points at `autoModeClassifier: false` or an old plugin version
-- [ ] `CLAUDE.md`: the fail-closed list gains the outbound guard, the prefixed-id rule, the classifier predicate with its stated residual, and the strict `.catch`; the thread-invariant wording follows the delivery table
-- [ ] `docs/design-notes.md`: "The shadow step" rewritten for answer in place; the spike tables kept, each pointing at the probe in `scripts/probes/` that reproduces it
-- [ ] `CLAUDE.md` Commands: `scripts/automode-check.sh` and the probes, with the note to re-run them after a Claude Code release
+- [x] README "How it works": the new flow diagram
+- [x] README Limits: replace the auto-mode limitation with what now holds: auto mode works; the classifier runs on the subscription and sees the session's prompts and tool calls; the session classifies locally from the first routed step on, subscription loops included; the `autoModeClassifier` opt-out applies to the whole session, and right after a reload with it set a classifier request can be refused once; not behind `ANTHROPIC_BASE_URL`; provider calls go through `curl` (a reply may take up to 570 s); without `curl` the plugin falls back to `$.http.fetch`, where a reply must arrive within 30 s (the host's limit, which `v0.1.2` also has); routed replies are still not streamed
+- [x] README: correct "Your subscription is never routed and never pays for a routed call" to state the classifier exception exactly
+- [x] README Troubleshooting: the no-verdict row now points at `autoModeClassifier: false` or an old plugin version
+- [x] `CLAUDE.md`: the fail-closed list gains the outbound guard, the prefixed-id rule, the classifier predicate with its stated residual, and the strict `.catch`; the thread-invariant wording follows the delivery table
+- [x] `docs/design-notes.md`: "The shadow step" rewritten for answer in place; the spike tables kept, each pointing at the probe in `scripts/probes/` that reproduces it
+- [x] `CLAUDE.md` Commands: `scripts/automode-check.sh` and the probes, with the note to re-run them after a Claude Code release
 - [ ] move this plan to `docs/plans/completed/`
 
 ## Post-Completion

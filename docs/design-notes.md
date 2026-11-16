@@ -1,9 +1,12 @@
 # Design notes: engine behaviour the router depends on
 
 Facts about Claude Code's engine that provider-router is built on, proven by a
-throwaway verification spike (Claude Code 2.1.323, November 2026) and by the
-live smoke tests. The spike harness itself is no longer in the repo (see git
-history, commit `66e4a3d`); this file keeps what it found. Re-check these after
+throwaway verification spike (Claude Code 2.1.323, November 2026), by the
+answer-in-place probes (2.1.325, kept in `scripts/probes/`) and by the
+live smoke tests. The first spike's harness is no longer in the repo (see git
+history, commit `66e4a3d`); this file keeps what it found, and the probes'
+README lists the command and the expected record for each row that has one.
+Re-check these after
 a Claude Code release that changes the plugin API.
 
 ## The shadow step
@@ -21,10 +24,22 @@ the plugin APIs gives all of that:
 
 So a routed `turn.step` hook calls `next({ ...e, model: SHADOW_MODEL })`. The
 engine builds the exact request for this step and passes it through
-`http.fetch`. The mod's `http.fetch` hook takes that request, answers it
-locally with a stub SSE body (it never reaches the network), and the step
-drains and discards the stub. The captured body is then sent to the real
-provider.
+`http.fetch`. The mod's `http.fetch` hook takes that request — it never
+reaches the network — and **answers it in place**: its handler
+(`hooks/answer.ts`) resolves the conversation, sends it to the real provider
+(through the `curl` child, `hooks/transport.ts`), and returns the provider's
+reply to the engine as an Anthropic SSE body (zero usage, the provider's
+model name, a router-minted message id; `hooks/sse.ts`). The engine's own
+chunks then flow up through `turn.step`, and after the stream the step
+decides delivery from the job's phase and the engine's result (`routedStep`
+in `hooks/register.ts`). For an error reply, a timeout or Esc, the engine
+gets the empty stub instead and the step yields hook-made error chunks — or
+nothing after Esc.
+
+Before answer in place (up to and including `v0.1.2`) the hook answered an
+empty stub and the step yielded the reply as hook-made chunks; that is the
+flow the "Auto mode" rows below were recorded against, and the one auto mode
+could not work with.
 
 This works for subagents too: the subagent's own step calls `next`, so the
 engine builds the subagent's request (its own tools and system prompt from the
@@ -33,10 +48,14 @@ agent file).
 How requests are told apart:
 
 - engine requests carry `init.compress` (`"gzip"`) and the
-  `x-claude-code-session-id` header; the mod's own `$.http.fetch` calls have
-  neither;
+  `x-claude-code-session-id` header; the mod's own calls (a nested
+  `$.http.fetch`, the `curl` child) have neither;
 - a subagent's request carries `x-claude-code-agent-id` (absent on the main
   loop).
+
+Reproduce the capture and the answer with `scripts/probes/run-probe.sh`
+(`scripts/probes/README.md` rows 1 to 3); the flow against the shipped
+plugin is `scripts/automode-check.sh`.
 
 ### Shadow model id
 
@@ -58,21 +77,48 @@ models.
 
 ### Fail-closed rules (do not weaken)
 
-`hooks/shadow.ts` refuses, never passes:
+`hooks/shadow.ts` decides every engine request by one rule order (its
+header); it refuses, never passes, with the classifier of rule 3 as the only
+exception:
 
-- strict match: engine request, `body.model === SHADOW_MODEL`, the loop key
-  from `x-claude-code-agent-id` (`main` when absent), and
-  `1 <= messages.length <= e.messageCount`. `e.messageCount` counts stored
-  rows, not API messages (live: 22 rows, 2 API messages), hence `<=`;
-- one pending capture per loop, kept until the shadow stream has ended (also
-  on error, abort, Esc); a second shadow for a pending loop is refused;
-- while a shadow is pending, every other engine request for that loop is
-  answered locally (a non-retryable 400), and so is any shadow-model request
-  matching no entry (for example after a module reload empties the map);
+1. it names the shadow model (body or URL): the one strict match of a
+   pending job is answered locally, every other one is refused. Strict
+   match: engine request, `body.model === SHADOW_MODEL`, the loop key
+   from `x-claude-code-agent-id` (`main` when absent), and
+   `1 <= messages.length <= e.messageCount`. `e.messageCount` counts stored
+   rows, not API messages (live: 22 rows, 2 API messages), hence `<=`.
+   One pending job per loop, kept until the shadow stream has ended (also
+   on error, abort, Esc); a second shadow for a pending loop is refused;
+2. it names a router-prefixed or malformed-prefix model id (body, URL, or
+   unparseable text), or its body is unreadable while any job is pending:
+   refused, pending job or not. The engine sends requests of its own under
+   the session's prefixed id that bypass `turn.step` (a prompt suggestion,
+   its own compaction, the classifier's retry); none may reach the
+   first-party host;
+3. it matches the auto-mode classifier predicate ("Classifier predicate"
+   below): passed when the `autoModeClassifier` option is on; with it off,
+   refused once a step was routed since the module loaded, or while no step
+   was seen at all (a reload clears both flags);
+4. any other engine request of a loop with a pending job: answered locally
+   (a non-retryable 400), and so is any shadow-model request matching no
+   entry (for example after a module reload empties the map);
+5. anything else: passed.
+
+The handler guards what it sends itself: the outbound guard
+(`hooks/answer.ts`) refuses, before anything is sent, a routed model equal
+to `SHADOW_MODEL` and a custom endpoint URL naming it (a nested
+`$.http.fetch` skips the mod's own hook); a conversation that merely quotes
+the name is sent.
+
 - `shadowLeaks` (shadow-model requests that got past every engine-request
   rule to the last guard, and were refused there) must stay 0;
   `shadowRefused` counts stray requests refused locally. `/providers` shows
-  both;
+  both, and `classifierPassed` / `classifierRefused` for rule 3;
+- the `http.fetch` hook's `.catch` (`shadowFetchFailed`) never evaluates the
+  classifier predicate and never grants the exception: a request not yet
+  forwarded is refused when a job is pending, when it names the shadow model
+  or a prefixed id, or — with `autoModeClassifier` off — when it is an
+  engine request and a step was routed or none was seen;
 - circuit breaker: the engine's types say that where the organization's guard
   loads, only the guard's own mods see engine requests. The mod's hook then
   never runs and the shadow request goes to the first-party API (rejected
@@ -120,7 +166,10 @@ needs a beta header). `hooks/thread.ts` therefore:
 - records an error step as an assistant text turn (the engine records it the
   same way) and records nothing for a step cancelled before its reply was
   delivered. A step counts as delivered once the engine has read every chunk,
-  the stop chunk included, and asked for the step's result without Esc; it is
+  the stop chunk included, asked for the step's result without Esc, and that
+  result reflects the reply the router handed it (`sameDelivery` in
+  `hooks/sse.ts`: text trimmed, tool arguments deep-equal whatever the key
+  order, the stop reason); it is
   recorded only then. A delivery cut short (Esc, the stream closed or left)
   leaves the engine holding an unknown part of the reply, so the loop's
   conversation is dropped (system prompt and tools kept) and the next
@@ -160,9 +209,9 @@ live).
 | self-made `tool` + `input` + `stop{tool_use}` chunks | the engine runs the tool and sends a next step with the `tool_result`; `input` chunks split across yields are joined | adapters yield tool calls as chunks |
 | subagent with `model: <prefixed id>` | reaches `turn.step` with that model and its `agentId` | routed subagents need no extra config |
 | `--model 'x:my-gw:org/model:v1'` | reaches `turn.step` unchanged; the engine warns it does not know the model and assumes a 1M window | ids may contain `/` and `:` |
-| `$.http.fetch` | POST with body and headers works; 4xx/5xx resolve with `status`, `ok: false`, `text`. The host ends a call with no complete answer after 30 s (`aborted: no complete answer within 30000ms`, found in the 2.1.325 spike below) and aborts it on Esc | no timeout option, no streaming body; a provider reply slower than 30 s fails |
-| `$.clock.sleep` racing an in-flight `$.http.fetch` | does not use up the hook's 10 s budget (25 s fetch beat a 60 s timer; a 15 s timer beat a 25 s fetch) | timeout race in `call.ts`, default 600 s |
-| `next.signal` | exists on `turn.step`'s `next`, aborts on Esc | Esc ends the step; the sent provider call is not cancelled |
+| `$.http.fetch` | POST with body and headers works; 4xx/5xx resolve with `status`, `ok: false`, `text`. The host ends a call with no complete answer after 30 s (`aborted: no complete answer within 30000ms`, found in the 2.1.325 spike below) and aborts it on Esc | no timeout option, no streaming body; the provider transport therefore goes through a `curl` child (`hooks/transport.ts`), with `$.http.fetch` only as the 30 s fallback |
+| `$.clock.sleep` racing an in-flight `$.http.fetch` | does not use up the hook's 10 s budget (25 s fetch beat a 60 s timer; a 15 s timer beat a 25 s fetch) | timeout race in `call.ts`, default 570 s (below the engine's 600 s request timeout) |
+| `next.signal` | exists on `turn.step`'s `next`, aborts on Esc | Esc ends the step; on the curl transport it kills the child (the provider sees the connection drop), and a request already sent may still be billed |
 | `userConfig` `sensitive: true` string | validates; `""` when unset | keys in `/config` live in secure storage |
 | `userConfig` string list | `"type": "string[]"` fails validate; `"type": "string", "multiple": true` works and arrives as `[]` | `customEndpoints`, `contextWindows` |
 | `$.config` live values | no plugin rows in `-p`; a `/config` change reloads the module with new `options` | config read from `options` + env only |
@@ -196,19 +245,20 @@ unavailable, denying with retry guidance (fail closed)`).
 The smoke tests never met this: they run in the default mode with
 `--allowedTools Bash,Agent`.
 
-So the mod has no way to hand such a call to the person, and the person has
-none to allow it by rule; only leaving auto mode helps. The one thing a hook
-could do is answer `allow`, which would run a routed model's calls with no
-review at all while the session still says auto mode; the mod does not. The
-limit is documented in the README instead.
+So the mod had no way to hand such a call to the person, and the person had
+none to allow it by rule. The one thing a hook could do is answer `allow`,
+which would run a routed model's calls with no review at all while the
+session still says auto mode; the mod does not. This was the state up to and
+including `v0.1.2`; answer in place (next section) removed the limit.
 
 ### Answer in place (probed on throwaway copies, Claude Code 2.1.325, 2026-11-15)
 
 Probes with a local mock provider (`custom:mock:m` at `http://127.0.0.1`),
 `claude -p --permission-mode auto`, the main loop's model reply always an
-`Agent` call. None of this is in the mod yet; the plan is
-`docs/plans/20261115-auto-mode-answer-in-place.md`, whose spike task repeats
-each row with a kept script before any code depends on it.
+`Agent` call. These were the first probes, on throwaway copies before the
+plan existed; the mechanism they found now ships in the plugin (the spike
+section below repeats every row with the kept scripts of
+`scripts/probes/`).
 
 | Probe | Result |
 |---|---|
@@ -285,7 +335,7 @@ Also seen, outside the checklist:
 - in `-p` runs the OS sandbox stopped the judged `touch` outside the working
   directory (`Operation not permitted`); the interactive runs wrote the file.
 
-#### Classifier predicate (proposed)
+#### Classifier predicate (as shipped, `isClassifierRequest` in `hooks/shadow.ts`; `scripts/probes/check-predicate.py` re-checks it)
 
 ```
 evaluated only after the unconditional refusals (shadow model, shadow URL, prefixed or malformed model id)

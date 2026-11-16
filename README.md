@@ -186,6 +186,37 @@ Code accepts only 100000 to 1000000 there, so a subagent on a model with a
 smaller window (such as the 32K example above) cannot be covered: keep its
 tasks small.
 
+### Auto mode
+
+Auto mode (`--permission-mode auto`, or Shift+Tab to it) has Claude Code's
+own safety classifier decide each tool call that no rule settles. The plugin
+makes that work for routed models: the provider's reply is handed to Claude
+Code in place of the answer it asked for, Claude Code then judges tool calls
+with its local classifier, and the plugin lets exactly those classifier
+requests through to Anthropic. No verdict is forged and no check is
+bypassed; a call the classifier blocks does not run.
+
+Two things to know:
+
+- **The classifier runs on your subscription.** Its requests go to the
+  Anthropic API on your Claude sign-in, not to any provider key, and they
+  carry the session's prompts and tool calls (routed loops included). From
+  the first routed step on, the session classifies locally even for later
+  steps on subscription models.
+- **You can refuse them.** Set the option `autoModeClassifier` to `false`
+  (in `/config`, or a settings file) and the plugin refuses the session's
+  classifier requests once any step was routed. Auto mode then fails closed:
+  a call no rule settles is refused with a visible message saying auto mode
+  cannot determine the safety of the tool (Claude Code retries the
+  classifier under the routed model id first, which the plugin also
+  refuses). The opt-out applies to the whole session; right after a plugin
+  reload with it set, a classifier request can be refused once until the
+  next step.
+
+Behind `ANTHROPIC_BASE_URL` the classifier requests carry no recognizable
+marker, so the exception never applies there: a classifier request sent
+while a routed step is in flight is refused and that call fails closed.
+
 ### Invalid entries
 
 A malformed entry (for example a `customEndpoints` entry without `=`, or a
@@ -251,19 +282,26 @@ also in the background while the main session keeps working.
                |                     step's request (system prompt, tools,
       Claude subscription            messages) for a model id that does not
                                      exist; the router's http.fetch hook
-                                     captures it and answers it locally
-                                     (it is never sent)
-                                  2. rebuild the full conversation
-                                     (history kept per loop)
-                                  3. send it to the provider with your key
+                                     captures it (it is never sent)
+                                  2. inside that hook: rebuild the full
+                                     conversation (history kept per loop),
+                                     send it to the provider with your key
+                                     through a curl child process
                                         |                     |
                              Anthropic Messages API   OpenAI Chat Completions
                              anthropic:, zai:         openai:, xai:, custom:<name>:
                              (as is)                  (translated both ways)
                                         |                     |
-                                  4. reply -> text and tool-call chunks;
-                                     Claude Code runs the tools as usual
+                                  3. the provider's reply is returned to the
+                                     engine as an Anthropic stream, in place
+                                     of the answer it asked for; the engine's
+                                     own chunks flow up, Claude Code runs the
+                                     tools as usual
 ```
+
+The reply the engine reads carries zero usage (so `/cost` shows zero for a
+routed step) and the provider's model name; the router records the provider's
+real token counts itself, which is what drives context compaction.
 
 Claude Code still runs tools, permissions, hooks, subagents and the
 transcript; only the model call moves. The engine behaviour this relies on is
@@ -280,6 +318,15 @@ a Claude ..." is sent as written.
 ## Limits
 
 - **No streaming** for routed models: a reply appears when it is complete.
+- **Provider calls go through a `curl` child process**, so a reply may take
+  up to the 570 s provider timeout. The command line is always just
+  `curl --disable --config -`: the URL, the headers (your key among them)
+  and the body go in a curl config written to the child's stdin, never on
+  the command line, in a file or in the child's environment. When `curl`
+  cannot be started, the plugin falls back to its own HTTP call, where a
+  reply must arrive within 30 s (Claude Code's limit on a plugin call, which
+  earlier versions had everywhere); a slower reply then fails with an error
+  saying so. `/providers` shows which transport is in use.
 - **No extended thinking on any routed model**, and `effort` is ignored,
   except that it becomes `reasoning_effort` for OpenAI reasoning models (`o*`,
   `gpt-5*` except `gpt-5-chat*`) and for xAI reasoning models (every `grok`
@@ -310,10 +357,14 @@ a Claude ..." is sent as written.
   xAI publishes no maximum output size, so a smoke run is the only check.
   Everything else, including every `custom:` model, gets 8192, which is not
   configurable: a very long file write on such a model can stop at the limit.
-- **Esc does not cancel a call already sent.** The step ends at once, but the
-  provider still finishes the request and bills it. Provider timeout: 600 s.
-  Esc while a reply is being handed to Claude Code drops the router's copy of
-  the conversation; the next step rebuilds it from the session history.
+- **Esc ends a provider call at once.** With the `curl` transport the child
+  is killed and the provider sees the connection drop; a request already
+  sent may still be billed. Esc during a provider call, or while a reply is
+  being handed to Claude Code, drops the router's copy of the conversation;
+  the next step rebuilds it from the session history. When the call is
+  cancelled without Esc (Claude Code gives up on the request), the step
+  shows a `[provider-router]` error saying the request was cancelled before
+  the reply arrived, instead of ending silently.
 - **An organization-managed guard can switch routing off.** The router sees
   the request Claude Code builds through its own `http.fetch` hook. Where an
   organization's guard loads, Claude Code shows engine requests to the
@@ -330,28 +381,22 @@ a Claude ..." is sent as written.
   before sending) looks the same to the router and also turns routing off
   until then; in a session where every step is routed, that lasts until a
   restart.
-- **Auto mode cannot review a routed model's tool calls.** In auto mode
-  (`--permission-mode auto`, or Shift+Tab to it) Claude Code's classifier
-  decides each call that no rule settles, and its verdict comes back with
-  Anthropic's own reply to the step. A routed step is answered by another
-  provider, so there is no verdict and Claude Code refuses the call: `The
-  server-side auto mode classifier gave no verdict for <tool> ...`, shown as
-  `Not run · auto mode's check had no usable answer`. This affects a routed
-  main session and every routed subagent (which inherits the mode), and most
-  visibly `Agent`: a routed main session cannot start any subagent. Reads,
-  and edits and commands that accept-edits mode would allow, still run. The
-  plugin cannot supply the verdict and does not override the refusal, and an
-  allow rule does not help: auto mode ignores rules that would bypass its
-  classifier (`Agent`, `Agent(<type>)`). Use default or accept-edits mode for
-  sessions with routed models; there, permission prompts and allow rules
-  work as usual.
-- **Your subscription is never routed** and never pays for a routed call. The
-  router does not use your Claude sign-in.
+- **Auto mode works with routed models** (see
+  [Auto mode](#auto-mode)): Claude Code's own classifier judges the calls,
+  on your subscription. With the `autoModeClassifier` option set to `false`,
+  auto mode instead refuses every call of a routed step that no rule
+  settles, with a visible message.
+- **Your subscription pays for a routed call only in auto mode** — for the
+  classifier requests the engine sends while judging the session's tool
+  calls (see [Auto mode](#auto-mode)); set `autoModeClassifier: false` to
+  refuse them. Every model call the router routes itself goes to the
+  provider with your provider key; the router never uses your Claude sign-in
+  for it.
 - **History in memory.** Claude Code sends a conversation as a thread (after
   the first request, only the new messages), so the router keeps each routed
   conversation's history itself. When it has none for a step (after a step
-  that failed before its request was captured, Esc on a conversation's first
-  routed step or while a reply was handed over, an engine fork such as
+  that failed before its request was captured, Esc during a routed step —
+  a provider call or a reply being handed over —, an engine fork such as
   compaction, a subagent resumed after
   its turn ended, or a switch from a subscription model), it rebuilds it from
   the session's own history. An engine fork such as compaction takes the
@@ -366,10 +411,15 @@ a Claude ..." is sent as written.
   `model_context_window_exceeded` for a context-length error. A parent agent
   gets the same text from a routed subagent.
 - **`/cost` shows a `provider-router-shadow` line with 0 tokens and $0.** That
-  is the local stand-in for the captured request. It is expected and never
-  costs anything. Routed usage is on each provider's own dashboard.
+  is the local stand-in for the captured request: Claude Code's own cost
+  accounting shows zero for routed steps. It is expected and never costs
+  anything. The router records the provider's real token counts itself, so
+  its context compaction stays correct; routed usage and cost are on each
+  provider's own dashboard.
 
-## Verified status (v0.1.0, Claude Code 2.1.323)
+## Verified status
+
+Providers (verified at the v0.1.0 release, Claude Code 2.1.323):
 
 | Provider | Status |
 |---|---|
@@ -378,7 +428,15 @@ a Claude ..." is sent as written.
 | custom: LiteLLM proxy with a key | live-verified, same cases |
 | Anthropic Platform (`anthropic:`) | unit-tested; requests reach the API and `/providers models` works, but no full live run at release |
 | OpenAI Platform (`openai:`) | unit-tested only; not live-verified at release |
-| xAI (`xai:`) | unit-tested only; not live-verified at release |
+| xAI (`xai:`) | unit-tested only; no live run has been made (no key available), so its limits and request shaping rest on the unit tests alone |
+
+Auto mode and transport (live-verified on Claude Code 2.1.325, with a local
+mock provider): auto mode with routed models in four cases (a routed main
+session starting a subagent, a routed subagent's command call, a call the
+classifier blocks, and the `autoModeClassifier` opt-out); a 60 s provider
+reply delivered through the `curl` transport; the 30 s fallback error when
+`curl` is unavailable; default and accept-edits modes behaving as in
+v0.1.2.
 
 Not yet checked by hand in an interactive session: Esc during a routed step,
 automatic compaction of a routed main session, `/rewind` in a routed
@@ -406,15 +464,20 @@ models use it.
 | `unknown custom endpoint "x"` | the name in `custom:<name>:` must match a `customEndpoints` entry |
 | `the conversation so far is not known to the router` | the plugin reloaded mid-conversation (or the history could not be rebuilt): run `/clear` or `/compact` |
 | `routing is off: this plugin saw no engine request ...` | an organization-managed guard may hide Claude Code's requests from this plugin (see Limits); routing cannot work in that setup. If no guard is involved (another plugin answered a routed step), it turns back on after any step on a model without a router prefix, or restart Claude Code |
-| `The server-side auto mode classifier gave no verdict for Agent ...` / `Not run · auto mode's check had no usable answer` | auto mode cannot review a routed model's tool calls (see Limits): leave auto mode (Shift+Tab to default or accept-edits); an allow rule does not help in auto mode |
+| `The server-side auto mode classifier gave no verdict for <tool> ...` / `Not run · auto mode's check had no usable answer` | an old plugin version: auto mode now works with routed models (see [Auto mode](#auto-mode)) — update the plugin |
+| `<model> is temporarily unavailable, so auto mode cannot determine the safety of <tool>` | the engine's classifier requests are refused: `autoModeClassifier` is `false`, or the session runs behind `ANTHROPIC_BASE_URL` (see [Auto mode](#auto-mode)); leave auto mode (Shift+Tab) or turn the option back on |
 | `malformed model id "..."` | a router prefix with nothing after it (`openai:`, `custom:gw`): use `<prefix>:<model>` or `custom:<name>:<model>` |
 | context-length error in a subagent | the task was too large for the model: lower `autoCompactWindow` or split the task |
 | anything else | `/providers` (status, warnings, counters), `/providers models` (calls each provider), `claude --debug` |
 
-`/providers` also shows two safety counters, `shadowLeaks` and
-`shadowRefused`. `shadowLeaks` must be 0; if it is not, please open an issue.
-It adds a `routing is off` line when the router has switched itself off
-because it saw no Claude Code request for a routed step (see Limits).
+`/providers` also shows the transport in use (`transport: curl`, or
+`transport: fetch (30 s limit)` when `curl` cannot be started), the
+`autoModeClassifier` setting, how many of the engine's classifier requests
+were passed and refused (`classifier requests: passed N, refused M`), and
+the safety counters `shadow: shadowLeaks N, shadowRefused M`.
+`shadowLeaks` must be 0; if it is not, please open an issue. It adds a
+`routing is off` line when the router has switched itself off because it saw
+no Claude Code request for a routed step (see Limits).
 
 ## Security
 
@@ -425,10 +488,18 @@ because it saw no Claude Code request for a routed step (see Limits).
   like a key, before it is shown.
 - A key is sent only to its own provider's base URL. Custom endpoint URLs are
   yours to choose; use `https` for anything not on your machine.
+- On the `curl` transport your key travels in a curl config on the child's
+  stdin only: never on its command line (visible to every process on the
+  machine), never in a file, never in the child's environment. `--disable`
+  keeps curl from reading any `.curlrc`, so no trace file or proxy of yours
+  is picked up either.
 - The captured request never leaves your machine: the router answers it
-  locally, its model id does not exist, and any request the router cannot
-  match is refused (it fails closed).
-- The router never uses your Claude sign-in to pay for a routed call.
+  locally with the provider's reply, its model id does not exist, and any
+  request the router cannot match is refused (it fails closed).
+- The router never uses your Claude sign-in for a routed model call. The one
+  first-party traffic it passes through is auto mode's classifier requests,
+  which the engine itself sends on your subscription (see
+  [Auto mode](#auto-mode)); set `autoModeClassifier: false` to refuse them.
 
 ## Development
 
@@ -460,6 +531,18 @@ subscription model for the subagent and switch cases; default your default
 model), `SMOKE_TIMEOUT` (seconds per session, default 600), `SMOKE_KEEP=1`.
 Transcripts are read from `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`.
 Conventions for contributors are in [CLAUDE.md](CLAUDE.md).
+
+Two more checks need no provider key. The auto-mode check runs four cases
+against a local mock provider; it costs only the small classifier requests
+the engine sends on your subscription:
+
+```bash
+npm run automode             # or scripts/automode-check.sh
+```
+
+And `scripts/probes/README.md` lists the probes that re-check the engine
+behaviour the router depends on — worth re-running after a Claude Code
+release that changes the plugin API or auto mode.
 
 ## License
 
